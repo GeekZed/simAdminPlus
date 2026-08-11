@@ -1,0 +1,19 @@
+[Unit]
+Description=SimAdmin DATA6 secondary QMI initializer
+After=systemd-udevd.service systemd-modules-load.service
+Before=ModemManager.service simadmin.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=root
+ExecStart=/opt/simadmin/simadmin secondary-qmi-init
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=75
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=simadmin-secondary-qmi
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+name: VoLTE ARM64 Check
+
+on:
+  push:
+    branches:
+      - feat/volte-beta9-port
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build backend for ARM64
+        working-directory: backend
+        env:
+          SQLITE3_STATIC: '1'
+          LIBSQLITE3_SYS_USE_PKG_CONFIG: '0'
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --locked --release --target aarch64-unknown-linux-musl
+
+      - name: Upload ARM64 backend
+        uses: actions/upload-artifact@v4
+        with:
+          name: simadmin-volte-aarch64
+          path: backend/target/aarch64-unknown-linux-musl/release/simadmin
+          if-no-files-found: error
