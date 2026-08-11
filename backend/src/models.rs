@@ -907,6 +907,19 @@ pub struct ImsStatusResponse {
     pub last_error: String,
 }
 
+#[derive(Debug, Default, Serialize)]
+pub struct VolteControlResponse {
+    pub enabled: bool,
+    pub feature_enabled: bool,
+    pub sms_enabled: bool,
+    pub runtime: crate::volte::RuntimeStatus,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetVolteFeatureRequest {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Serialize, Default)]
 pub struct VoicemailStatusResponse {
     pub waiting: bool,

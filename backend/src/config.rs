@@ -2116,6 +2116,15 @@ impl ConfigManager {
         self.config.read().unwrap().clone()
     }
 
+    pub fn set_volte_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut config = self.config.write().unwrap();
+            config.volte.feature_enabled = enabled;
+            config.volte.sms_enabled = enabled;
+        }
+        self.save()
+    }
+
     pub fn replace_config(&self, config: AppConfig) -> Result<(), String> {
         {
             let mut current = self.config.write().unwrap();

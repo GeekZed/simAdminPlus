@@ -801,6 +801,14 @@ async fn main() -> Result<()> {
             get(get_ims_status_handler).options(options_handler),
         )
         .route(
+            "/api/volte/control",
+            get(get_volte_control_handler).options(options_handler),
+        )
+        .route(
+            "/api/volte/feature",
+            post(set_volte_feature_handler).options(options_handler),
+        )
+        .route(
             "/api/voicemail/status",
             get(get_voicemail_status_handler).options(options_handler),
         )

@@ -3229,6 +3229,46 @@ pub async fn get_ims_status_handler() -> impl IntoResponse {
     )
 }
 
+pub async fn get_volte_control_handler(State(app): State<AppState>) -> impl IntoResponse {
+    let config = app.config_manager.get_config();
+    let runtime = crate::volte::read_runtime_status().unwrap_or_default();
+    let data = VolteControlResponse {
+        enabled: config.volte.feature_enabled,
+        feature_enabled: config.volte.feature_enabled,
+        sms_enabled: config.volte.sms_enabled,
+        runtime,
+    };
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message("VoLTE control status", data)),
+    )
+}
+
+pub async fn set_volte_feature_handler(
+    State(app): State<AppState>,
+    Json(payload): Json<SetVolteFeatureRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = app.config_manager.set_volte_enabled(payload.enabled) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<VolteControlResponse>::error(error)),
+        );
+    }
+
+    let config = app.config_manager.get_config();
+    let runtime = crate::volte::read_runtime_status().unwrap_or_default();
+    let data = VolteControlResponse {
+        enabled: config.volte.feature_enabled,
+        feature_enabled: config.volte.feature_enabled,
+        sms_enabled: config.volte.sms_enabled,
+        runtime,
+    };
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message("VoLTE feature updated", data)),
+    )
+}
+
 pub async fn get_voicemail_status_handler() -> impl IntoResponse {
     (
         StatusCode::OK,
