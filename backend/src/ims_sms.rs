@@ -22,6 +22,12 @@ pub struct ConcatInfo {
     pub sequence: u8,
 }
 
+struct PendingRpAck {
+    packet: Vec<u8>,
+    deadline: tokio::time::Instant,
+    attempts: u8,
+}
+
 pub fn parse_sip_message(packet: &[u8]) -> Result<(HashMap<String, String>, Vec<u8>)> {
     let separator = packet
         .windows(4)
@@ -77,24 +83,36 @@ fn decode_address(bytes: &[u8], digits: usize) -> Result<(String, usize)> {
     Ok((number, octets + 1))
 }
 
-fn gsm7_char(value: u8) -> char {
-    if value < 0x20 {
-        return match value {
-            0x0a => '\n',
-            0x0d => '\r',
-            _ => ' ',
-        };
-    }
-    if value < 0x7f {
-        return value as char;
-    }
-    '?'
+fn gsm7_char(value: u8) -> Option<char> {
+    Some(match value {
+        0x00 => '@', 0x01 => '£', 0x02 => '$', 0x03 => '¥',
+        0x04 => 'è', 0x05 => 'é', 0x06 => 'ù', 0x07 => 'ì',
+        0x08 => 'ò', 0x09 => 'Ç', 0x0a => '\n', 0x0b => 'Ø',
+        0x0c => 'ø', 0x0d => '\r', 0x0e => 'Å', 0x0f => 'å',
+        0x10 => 'Δ', 0x11 => '_', 0x12 => 'Φ', 0x13 => 'Γ',
+        0x14 => 'Λ', 0x15 => 'Ω', 0x16 => 'Π', 0x17 => 'Ψ',
+        0x18 => 'Σ', 0x19 => 'Θ', 0x1a => 'Ξ', 0x1b => return None,
+        0x1c => 'Æ', 0x1d => 'æ', 0x1e => 'ß', 0x1f => 'É',
+        0x24 => '¤', 0x40 => '¡', 0x5b => 'Ä', 0x5c => 'Ö',
+        0x5d => 'Ñ', 0x5e => 'Ü', 0x5f => '§', 0x60 => '¿',
+        0x7b => 'ä', 0x7c => 'ö', 0x7d => 'ñ', 0x7e => 'ü',
+        0x7f => 'à',
+        value if (0x20..=0x7a).contains(&value) => value as char,
+        _ => '�',
+    })
 }
 
-fn decode_gsm7(data: &[u8], septets: usize) -> String {
-    (0..septets)
-        .map(|index| {
-            let bit = index * 7;
+fn gsm7_extension(value: u8) -> char {
+    match value {
+        0x0a => '\u{000c}', 0x14 => '^', 0x28 => '{', 0x29 => '}',
+        0x2f => '\\', 0x3c => '[', 0x3d => '~', 0x3e => ']',
+        0x40 => '|', 0x65 => '€', _ => '�',
+    }
+}
+
+fn decode_gsm7(data: &[u8], septets: usize, bit_offset: usize) -> String {
+    let values = (0..septets).map(|index| {
+            let bit = bit_offset + index * 7;
             let byte = bit / 8;
             let shift = bit % 8;
             let mut value = (data.get(byte).copied().unwrap_or_default() >> shift) & 0x7f;
@@ -102,12 +120,27 @@ fn decode_gsm7(data: &[u8], septets: usize) -> String {
                 value |= data.get(byte + 1).copied().unwrap_or_default() << (8 - shift);
                 value &= 0x7f;
             }
-            gsm7_char(value)
-        })
-        .collect()
+            value
+        });
+    let mut escaped = false;
+    let mut result = String::new();
+    for value in values {
+        if escaped {
+            result.push(gsm7_extension(value));
+            escaped = false;
+        } else if let Some(character) = gsm7_char(value) {
+            result.push(character);
+        } else {
+            escaped = true;
+        }
+    }
+    if escaped {
+        result.push('�');
+    }
+    result
 }
 
-fn parse_concat_udh(data: &[u8]) -> Option<(ConcatInfo, usize)> {
+fn parse_udh(data: &[u8]) -> Option<(Option<ConcatInfo>, usize)> {
     let header_length = *data.first()? as usize;
     if data.len() < header_length + 1 {
         return None;
@@ -122,27 +155,27 @@ fn parse_concat_udh(data: &[u8]) -> Option<(ConcatInfo, usize)> {
         }
         if identifier == 0x00 && length == 3 {
             return Some((
-                ConcatInfo {
+                Some(ConcatInfo {
                     reference: data[index] as u16,
                     total: data[index + 1],
                     sequence: data[index + 2],
-                },
+                }),
                 header_length + 1,
             ));
         }
         if identifier == 0x08 && length == 4 {
             return Some((
-                ConcatInfo {
+                Some(ConcatInfo {
                     reference: u16::from_be_bytes([data[index], data[index + 1]]),
                     total: data[index + 2],
                     sequence: data[index + 3],
-                },
+                }),
                 header_length + 1,
             ));
         }
         index += length;
     }
-    None
+    Some((None, header_length + 1))
 }
 
 fn decode_sms_deliver(tpdu: &[u8]) -> Result<(String, String, Option<ConcatInfo>)> {
@@ -164,8 +197,7 @@ fn decode_sms_deliver(tpdu: &[u8]) -> Result<(String, String, Option<ConcatInfo>
             return Err(anyhow!("IMS UCS2 SMS data is truncated"));
         }
         let (concat, header_bytes) = if tpdu[0] & 0x40 != 0 {
-            parse_concat_udh(data)
-                .map(|(info, length)| (Some(info), length))
+            parse_udh(data)
                 .unwrap_or((None, 0))
         } else {
             (None, 0)
@@ -182,7 +214,21 @@ fn decode_sms_deliver(tpdu: &[u8]) -> Result<(String, String, Option<ConcatInfo>
         )?;
         return Ok((phone_number, content, concat));
     } else if dcs & 0x0c == 0x00 {
-        decode_gsm7(data, length)
+        let (concat, header_bytes) = if tpdu[0] & 0x40 != 0 {
+            parse_udh(data).unwrap_or((None, 0))
+        } else {
+            (None, 0)
+        };
+        let header_septets = (header_bytes * 8).div_ceil(7);
+        if header_septets > length || data.len() * 8 < length * 7 {
+            return Err(anyhow!("IMS GSM7 SMS data is truncated"));
+        }
+        let content = decode_gsm7(
+            &data[header_bytes..],
+            length - header_septets,
+            header_septets * 7 - header_bytes * 8,
+        );
+        return Ok((phone_number, content, concat));
     } else {
         String::from_utf8_lossy(&data[..length.min(data.len())]).into_owned()
     };
@@ -268,6 +314,15 @@ fn header_uri(value: &str) -> Option<String> {
     Some(value.split(';').next()?.trim().to_string())
 }
 
+fn next_message_cseq(headers: &HashMap<String, String>) -> u32 {
+    headers
+        .get("cseq")
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1)
+        .saturating_add(1)
+}
+
 pub fn build_rp_ack_message(
     headers: &HashMap<String, String>,
     local: std::net::Ipv6Addr,
@@ -291,12 +346,7 @@ pub fn build_rp_ack_message(
     let call_id = headers
         .get("call-id")
         .ok_or_else(|| anyhow!("IMS SMS Call-ID header is missing"))?;
-    let cseq = headers
-        .get("cseq")
-        .and_then(|value| value.split_whitespace().next())
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(1)
-        .saturating_add(1);
+    let cseq = next_message_cseq(headers);
     let branch = format!("z9hG4bK-simadmin-rp-ack-{cseq}");
     let mut header = format!(
         "MESSAGE {target} SIP/2.0\r\nVia: SIP/2.0/UDP [{local}]:{local_port};branch={branch};rport\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {cseq} MESSAGE\r\n"
@@ -326,27 +376,49 @@ pub async fn run_ims_sms_listener(
     notifications: Arc<NotificationSender>,
 ) -> Result<()> {
     let mut multipart: HashMap<(String, u16), Vec<Option<IncomingImsSms>>> = HashMap::new();
+    let mut pending_rp_acks: HashMap<(String, u32), PendingRpAck> = HashMap::new();
     let mut refresh_deadline = tokio::time::Instant::now() + refresh_after;
     let mut refresh_response_deadline = None;
     loop {
-        let deadline = refresh_response_deadline.unwrap_or(refresh_deadline);
+        let mut deadline = refresh_response_deadline.unwrap_or(refresh_deadline);
+        if let Some(ack_deadline) = pending_rp_acks.values().map(|ack| ack.deadline).min() {
+            deadline = deadline.min(ack_deadline);
+        }
         let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
         let Some(packet) = channel.receive_optional(wait).await? else {
-            if refresh_response_deadline.is_some() {
+            let now = tokio::time::Instant::now();
+            if refresh_response_deadline.is_some_and(|deadline| deadline <= now) {
                 return Err(anyhow!("IMS REGISTER refresh timed out"));
             }
-            registration.cseq = registration.cseq.saturating_add(1);
-            registration.nonce_count = registration.nonce_count.saturating_add(1);
-            let branch = format!("z9hG4bK-simadmin-refresh-{}", registration.cseq);
-            let request = crate::ims_sip::build_register_with_security(
-                &registration,
-                &branch,
-                &security_header,
-            )?;
-            channel.send(request.as_bytes()).await?;
-            refresh_response_deadline = Some(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
-            );
+            let expired_ack = pending_rp_acks
+                .iter()
+                .find(|(_, ack)| ack.deadline <= now)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = expired_ack {
+                let ack = pending_rp_acks.get_mut(&key).unwrap();
+                if ack.attempts >= 3 {
+                    return Err(anyhow!("IMS RP-ACK was not accepted after three attempts"));
+                }
+                ack.attempts += 1;
+                ack.deadline = now + std::time::Duration::from_secs(3);
+                let packet = ack.packet.clone();
+                channel.send(&packet).await?;
+                continue;
+            }
+            if refresh_deadline <= now {
+                registration.cseq = registration.cseq.saturating_add(1);
+                registration.nonce_count = registration.nonce_count.saturating_add(1);
+                let branch = format!("z9hG4bK-simadmin-refresh-{}", registration.cseq);
+                let request = crate::ims_sip::build_register_with_security(
+                    &registration,
+                    &branch,
+                    &security_header,
+                )?;
+                channel.send(request.as_bytes()).await?;
+                refresh_response_deadline = Some(
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+                );
+            }
             continue;
         };
         let Ok((headers, body)) = parse_sip_message(&packet) else {
@@ -366,6 +438,30 @@ pub async fn run_ims_sms_listener(
             refresh_response_deadline = None;
             refresh_deadline = tokio::time::Instant::now()
                 + crate::ims_sip::registration_refresh_delay(response);
+            continue;
+        }
+        let is_message_response = packet.starts_with(b"SIP/2.0 ")
+            && headers
+                .get("cseq")
+                .is_some_and(|value| value.to_ascii_uppercase().ends_with(" MESSAGE"));
+        if is_message_response {
+            let call_id = headers.get("call-id").cloned().unwrap_or_default();
+            let cseq = headers
+                .get("cseq")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_default();
+            let status = std::str::from_utf8(&packet)
+                .ok()
+                .and_then(crate::ims_sip::sip_status_code)
+                .unwrap_or_default();
+            if (200..300).contains(&status) {
+                pending_rp_acks.remove(&(call_id, cseq));
+            } else if status >= 300 {
+                if let Some(ack) = pending_rp_acks.get_mut(&(call_id, cseq)) {
+                    ack.deadline = tokio::time::Instant::now();
+                }
+            }
             continue;
         }
         let is_message = packet
@@ -393,7 +489,18 @@ pub async fn run_ims_sms_listener(
                     channel.security_verify(),
                     &ack,
                 ) {
-                    let _ = channel.send(&packet).await;
+                    channel.send(&packet).await?;
+                    if let Some(call_id) = headers.get("call-id") {
+                        pending_rp_acks.insert(
+                            (call_id.clone(), next_message_cseq(&headers)),
+                            PendingRpAck {
+                                packet,
+                                deadline: tokio::time::Instant::now()
+                                    + std::time::Duration::from_secs(3),
+                                attempts: 1,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -486,6 +593,12 @@ mod tests {
                 sequence: 1
             })
         );
+    }
+
+    #[test]
+    fn decodes_gsm7_default_alphabet() {
+        assert_eq!(decode_gsm7(&[0xE8, 0x32, 0x9B, 0xFD, 0x06], 5, 0), "hello");
+        assert_eq!(decode_gsm7(&[0x00], 1, 0), "@");
     }
 
     #[test]

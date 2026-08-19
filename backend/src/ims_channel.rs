@@ -227,4 +227,45 @@ mod tests {
         let receive_port = channel.reserve_security_receive_port().unwrap();
         assert_ne!(receive_port, channel.route().local.port());
     }
+
+    #[tokio::test]
+    async fn uses_negotiated_protected_send_and_receive_paths() {
+        let initial_server = UdpSocket::bind("[::1]:0").await.unwrap();
+        let route = SipRoute {
+            local: "[::1]:0".parse().unwrap(),
+            remote: initial_server.local_addr().unwrap(),
+        };
+        let mut channel = ImsSipChannel::bind(route, None).unwrap();
+        let send_port = channel.route().local.port();
+        let receive_port = channel.reserve_security_receive_port().unwrap();
+        let pcscf_receive = UdpSocket::bind("[::1]:0").await.unwrap();
+        let pcscf_send = UdpSocket::bind("[::1]:0").await.unwrap();
+
+        channel
+            .activate_security(
+                SipRoute {
+                    local: SocketAddr::new("::1".parse().unwrap(), send_port),
+                    remote: pcscf_receive.local_addr().unwrap(),
+                },
+                SocketAddr::new("::1".parse().unwrap(), receive_port),
+                pcscf_send.local_addr().unwrap(),
+                "ipsec-3gpp;spi-c=1".to_string(),
+            )
+            .unwrap();
+
+        channel.send(b"REGISTER protected").await.unwrap();
+        let mut request = [0u8; 64];
+        let (length, peer) = pcscf_receive.recv_from(&mut request).await.unwrap();
+        assert_eq!(&request[..length], b"REGISTER protected");
+        assert_eq!(peer.port(), send_port);
+
+        pcscf_send
+            .send_to(b"SIP/2.0 200 OK", ("::1", receive_port))
+            .await
+            .unwrap();
+        assert_eq!(
+            channel.receive(Duration::from_secs(1)).await.unwrap(),
+            b"SIP/2.0 200 OK"
+        );
+    }
 }
