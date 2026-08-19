@@ -464,7 +464,7 @@ export default function Sidebar({
             v{__APP_VERSION__} ({__GIT_BRANCH__}/{__GIT_COMMIT__})
           </Typography>
           <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.5 }}>
-            Copyright © 2026 @3899
+            Copyright © 2026 GeekZed · simAdminPlus
           </Typography>
         </Box>
       </Box>

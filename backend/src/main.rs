@@ -1045,7 +1045,7 @@ async fn main() -> Result<()> {
         commit = env!("GIT_COMMIT"),
         "SimAdmin - Debian SIM Management Service"
     );
-    info!("Copyright © 2026 GitHub 3899 - SimAdmin");
+    info!("Copyright © 2026 GeekZed - simAdminPlus");
 
     // 绑定端口，如果被占用则轮询等待（最多 30 秒）
     let listener = bind_with_retry(&args.host, args.port, 30).await?;
