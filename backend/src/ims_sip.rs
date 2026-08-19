@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 use tokio::net::UdpSocket;
 use tokio::time::{timeout, Duration};
 
@@ -41,19 +41,64 @@ pub fn parse_pcscf_address(output: &str) -> Option<Ipv6Addr> {
 }
 
 pub fn parse_pcscf_from_cgcontrdp(output: &str) -> Option<Ipv6Addr> {
-    output.lines().find_map(|line| {
-        let line = line.trim();
-        if !line.to_ascii_uppercase().starts_with("+CGCONTRDP:") {
-            return None;
+    parse_pcscf_candidates_from_cgcontrdp(output, "ims")
+        .into_iter()
+        .next()
+}
+
+pub fn parse_pcscf_candidates_from_cgcontrdp(output: &str, apn: &str) -> Vec<Ipv6Addr> {
+    let mut candidates = Vec::new();
+    for line in output.lines() {
+        let Some((_, values)) = line.split_once("+CGCONTRDP:") else {
+            continue;
+        };
+        let fields: Vec<&str> = values.split(',').map(str::trim).collect();
+        if fields.len() < 8
+            || !fields[2]
+                .trim_matches(['\'', '"'])
+                .eq_ignore_ascii_case(apn)
+        {
+            continue;
         }
-        line.split_once(':')?
-            .1
-            .split(',')
-            .skip(8)
-            .take(2)
-            .map(|value| value.trim().trim_matches(['\'', '"', '[', ']']))
-            .find_map(|value| value.parse().ok())
-    })
+        for field in fields.iter().skip(7).take(2) {
+            for address in parse_cgcontrdp_addresses(field) {
+                let IpAddr::V6(address) = address else {
+                    continue;
+                };
+                if !address.is_unspecified() && !candidates.contains(&address) {
+                    candidates.push(address);
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn parse_cgcontrdp_addresses(field: &str) -> Vec<IpAddr> {
+    field
+        .trim_matches(|character| matches!(character, '\'' | '"' | '[' | ']'))
+        .split_whitespace()
+        .filter_map(|value| {
+            if let Ok(address) = value.parse::<IpAddr>() {
+                return Some(address);
+            }
+            let octets: Vec<u8> = value
+                .split('.')
+                .map(str::parse::<u8>)
+                .collect::<Result<_, _>>()
+                .ok()?;
+            match octets.len() {
+                4 => Some(IpAddr::V4(std::net::Ipv4Addr::new(
+                    octets[0], octets[1], octets[2], octets[3],
+                ))),
+                16 => {
+                    let bytes: [u8; 16] = octets.try_into().ok()?;
+                    Some(IpAddr::V6(Ipv6Addr::from(bytes)))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn md5_hex(value: &[u8]) -> String {
@@ -457,6 +502,27 @@ mod tests {
         assert_eq!(
             parse_pcscf_from_cgcontrdp(response),
             Some("2001:db8::5".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn parses_all_unique_pcscf_candidates() {
+        let response = "+CGCONTRDP: 4,5,\"ims\",\"2001:db8::10\",\"::\",\"2001:db8::1\",\"::\",\"2001:db8::5\",\"2001:db8::6\"\r\n+CGCONTRDP: 5,6,\"ctnet\",\"2001:db8::20\",\"::\",\"2001:db8::1\",\"::\",\"2001:db8::99\",\"::\"";
+        assert_eq!(
+            parse_pcscf_candidates_from_cgcontrdp(response, "ims"),
+            vec![
+                "2001:db8::5".parse::<Ipv6Addr>().unwrap(),
+                "2001:db8::6".parse::<Ipv6Addr>().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_qualcomm_decimal_octet_pcscf() {
+        let response = "+CGCONTRDP: 4,5,\"ims\",\"32.1.13.184.0.0.0.0.0.0.0.0.0.0.0.16\",\"::\",\"::\",\"::\",\"36.14.0.102.192.0.64.20.0.0.0.0.0.0.0.1\",\"::\"";
+        assert_eq!(
+            parse_pcscf_candidates_from_cgcontrdp(response, "ims"),
+            vec!["240e:66:c000:4014::1".parse::<Ipv6Addr>().unwrap()]
         );
     }
 

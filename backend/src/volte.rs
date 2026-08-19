@@ -58,6 +58,7 @@ pub fn write_runtime_status(status: &RuntimeStatus) -> Result<()> {
 pub struct QmiBearerSettings {
     pub ipv6_address: String,
     pub ipv6_gateway: String,
+    pub ipv6_prefix: u8,
     pub mtu: Option<u32>,
 }
 
@@ -75,12 +76,21 @@ pub fn parse_qmi_bearer_settings(output: &str) -> Option<QmiBearerSettings> {
             .map(str::to_string)
     };
 
-    let ipv6_address = value("IPv6 address:")?.split('/').next()?.to_string();
+    let address_value = value("IPv6 address:")?;
+    let mut address_parts = address_value.split('/');
+    let ipv6_address = address_parts.next()?.to_string();
+    let ipv6_prefix = address_parts
+        .next()
+        .and_then(|prefix| prefix.parse::<u8>().ok())
+        .or_else(|| value("IPv6 subnet prefix:").and_then(|prefix| prefix.parse().ok()))
+        .filter(|prefix| *prefix <= 128)
+        .unwrap_or(64);
     let ipv6_gateway = value("IPv6 gateway address:")?.split('/').next()?.to_string();
     let mtu = value("MTU:").and_then(|value| value.parse().ok());
     Some(QmiBearerSettings {
         ipv6_address,
         ipv6_gateway,
+        ipv6_prefix,
         mtu,
     })
 }
@@ -101,7 +111,7 @@ pub async fn configure_secondary_ipv6_interface(
         .ipv6_gateway
         .parse::<std::net::Ipv6Addr>()
         .map_err(|_| anyhow!("secondary IMS IPv6 gateway is invalid"))?;
-    let prefix = 64;
+    let prefix = settings.ipv6_prefix;
     for args in [
         vec![
             "link".to_string(),
@@ -745,6 +755,7 @@ mod tests {
             Some(super::QmiBearerSettings {
                 ipv6_address: "2001:db8::10".to_string(),
                 ipv6_gateway: "2001:db8::1".to_string(),
+                ipv6_prefix: 64,
                 mtu: Some(1432),
             })
         );
@@ -757,6 +768,13 @@ mod tests {
         let settings = super::parse_qmi_bearer_settings(output).unwrap();
         assert_eq!(settings.ipv6_address, "2001:db8::10");
         assert_eq!(settings.ipv6_gateway, "2001:db8::1");
+        assert_eq!(settings.ipv6_prefix, 64);
+    }
+
+    #[test]
+    fn parses_separate_qmi_ipv6_prefix() {
+        let output = "IPv6 address: 2001:db8::10\nIPv6 subnet prefix: 56\nIPv6 gateway address: 2001:db8::1";
+        assert_eq!(super::parse_qmi_bearer_settings(output).unwrap().ipv6_prefix, 56);
     }
 
     #[test]
