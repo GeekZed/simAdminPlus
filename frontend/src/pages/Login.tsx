@@ -504,8 +504,6 @@ export default function Login() {
           color="text.secondary"
           sx={{ fontSize: 13 }}
         >
-          <Typography component="span" color="inherit">Copyright © 2026 GeekZed · simAdminPlus</Typography>
-          <Typography component="span" color="text.disabled">|</Typography>
           <CommunityTooltip />
           <Typography component="span" color="text.disabled">|</Typography>
           <Typography component="span" sx={{ font: 'inherit' }}>v{__APP_VERSION__}</Typography>
