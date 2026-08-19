@@ -134,6 +134,22 @@ export interface DeviceInfo {
   powered: boolean
 }
 
+export interface VolteRuntimeStatus {
+  phase: string
+  registered: boolean
+  sms_ready: boolean
+  transport: string
+  interface: string
+  last_error: string
+}
+
+export interface VolteControlResponse {
+  enabled: boolean
+  feature_enabled: boolean
+  sms_enabled: boolean
+  runtime: VolteRuntimeStatus
+}
+
 export interface SimInfo {
   present: boolean
   iccid: string

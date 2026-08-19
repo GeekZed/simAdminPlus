@@ -1,24 +1,43 @@
 import { Box, Card, CardContent, Typography, Stack, Switch, Chip } from '@mui/material'
-import { NetworkCheck, FlightTakeoff, TravelExplore, Tune } from '@mui/icons-material'
-import type { AirplaneModeResponse, RoamingResponse } from '@/api/types'
+import { NetworkCheck, FlightTakeoff, TravelExplore, Tune, PhoneInTalk } from '@mui/icons-material'
+import type { AirplaneModeResponse, RoamingResponse, VolteControlResponse } from '@/api/types'
 
 interface QuickControlsProps {
   dataStatus: boolean
   airplaneMode: AirplaneModeResponse | null
   roaming: RoamingResponse | null
+  volte: VolteControlResponse | null
   onToggleData: () => void
   onToggleAirplaneMode: () => void
   onToggleRoaming: () => void
+  onToggleVolte: () => void
 }
 
 export function QuickControls({
   dataStatus,
   airplaneMode,
   roaming,
+  volte,
   onToggleData,
   onToggleAirplaneMode,
   onToggleRoaming,
+  onToggleVolte,
 }: QuickControlsProps) {
+  const volteLabel = !volte?.enabled
+    ? '已关闭'
+    : volte.runtime.registered
+      ? '已注册'
+      : volte.runtime.phase === 'degraded'
+        ? '异常'
+        : '启动中'
+  const volteColor = !volte?.enabled
+    ? 'default'
+    : volte.runtime.registered
+      ? 'success'
+      : volte.runtime.phase === 'degraded'
+        ? 'error'
+        : 'warning'
+
   return (
     <Card sx={{ height: '100%' }}>
       <CardContent>
@@ -38,6 +57,20 @@ export function QuickControls({
               onChange={() => {
                 void onToggleData()
               }}
+              color="success"
+              size="small"
+            />
+          </Box>
+
+          <Box display="flex" alignItems="center" justifyContent="space-between">
+            <Box display="flex" alignItems="center" gap={1}>
+              <PhoneInTalk color={volte?.runtime.registered ? 'success' : 'disabled'} />
+              <Typography variant="body2">VoLTE</Typography>
+              <Chip label={volteLabel} size="small" color={volteColor} sx={{ height: 18, fontSize: '0.65rem' }} />
+            </Box>
+            <Switch
+              checked={volte?.enabled || false}
+              onChange={() => void onToggleVolte()}
               color="success"
               size="small"
             />

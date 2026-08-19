@@ -10,6 +10,7 @@ import type {
   AirplaneModeResponse,
   RoamingResponse,
   ConnectionAddressesResponse,
+  VolteControlResponse,
 } from '@/api/types'
 import { isTransientModemError, createThrottledWarner } from '@/utils/modemErrors'
 
@@ -60,12 +61,14 @@ export interface DashboardData {
   connectionAddresses: ConnectionAddresses
   speedHistory: Record<string, InterfaceSpeedHistory>
   roaming: RoamingResponse | null
+  volte: VolteControlResponse | null
 }
 
 export interface DashboardActions {
   toggleData: () => Promise<void>
   toggleAirplaneMode: () => Promise<void>
   toggleRoaming: () => Promise<void>
+  toggleVolte: () => Promise<void>
   loadData: () => Promise<void>
 }
 
@@ -85,6 +88,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const [connectivity, setConnectivity] = useState<ConnectivityResult | null>(null)
   const [connectionAddresses, setConnectionAddresses] = useState<ConnectionAddresses>({ ipv4: [], ipv6: [] })
   const [roaming, setRoaming] = useState<RoamingResponse | null>(null)
+  const [volte, setVolte] = useState<VolteControlResponse | null>(null)
   const [speedHistory, setSpeedHistory] = useState<Record<string, InterfaceSpeedHistory>>({})
   const speedHistoryRef = useRef<Record<string, InterfaceSpeedHistory>>({})
 
@@ -139,6 +143,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
         requestOrNull(api.getAirplaneMode(), 'airplane-mode'),
         requestOrNull(api.getNetworkConnectionAddresses(), 'connection-addresses'),
         requestOrNull(api.getRoamingStatus(), 'roaming'),
+        requestOrNull(api.getVolteControl(), 'volte'),
         requestOrNull(api.getCellsInfo(), 'cells'),
       ])
 
@@ -155,6 +160,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
         airplaneModeRes,
         addressesRes,
         roamingRes,
+        volteRes,
         cellsRes,
       ] = await fastPromise
 
@@ -165,6 +171,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       if (airplaneModeRes?.data) setAirplaneMode(airplaneModeRes.data)
       if (addressesRes?.data) setConnectionAddresses(addressesRes.data)
       if (roamingRes?.data) setRoaming(roamingRes.data)
+      if (volteRes?.data) setVolte(volteRes.data)
       if (cellsRes?.data) setCellsInfo(cellsRes.data)
 
       // 快速数据就绪，立即解除 loading
@@ -242,6 +249,19 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
     }
   }, [roaming])
 
+  const toggleVolte = useCallback(async () => {
+    const nextEnabled = !(volte?.enabled ?? false)
+    const snapshot = volte
+    if (snapshot) setVolte({ ...snapshot, enabled: nextEnabled, feature_enabled: nextEnabled })
+    try {
+      const response = await api.setVolteFeature(nextEnabled)
+      if (response.data) setVolte(response.data)
+    } catch (err) {
+      if (snapshot) setVolte(snapshot)
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [volte])
+
   useEffect(() => {
     // 首次加载：background = false，错误会展示给用户
     const timeout = window.setTimeout(() => {
@@ -279,11 +299,13 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       connectionAddresses,
       speedHistory,
       roaming,
+      volte,
     } as DashboardData,
     actions: {
       toggleData,
       toggleAirplaneMode,
       toggleRoaming,
+      toggleVolte,
       loadData,
     } as DashboardActions,
   }
