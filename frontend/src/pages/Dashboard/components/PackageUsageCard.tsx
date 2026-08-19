@@ -36,7 +36,7 @@ export function PackageUsageCard({ usage }: { usage: PackageUsageResponse | null
         <Box display="flex" alignItems="center" gap={1} mb={2}>
           <DataUsage color="primary" />
           <Typography variant="subtitle1" fontWeight={700}>套餐信息</Typography>
-          <Chip label={usage?.estimated ? '本地估算' : '未校准'} size="small" sx={{ ml: 'auto' }} />
+          <Chip label={usage?.enabled ? '手动校准' : '未校准'} size="small" sx={{ ml: 'auto' }} />
           <Button size="small" onClick={() => setOpen(true)}>校准</Button>
         </Box>
         {usage?.enabled ? (

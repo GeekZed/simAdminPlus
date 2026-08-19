@@ -3623,26 +3623,9 @@ pub struct PackageUsageCalibrationRequest {
     pub directed_used_bytes: u64,
 }
 
-async fn current_wwan_bytes(app: &AppState) -> (u64, u64) {
-    let interfaces = get_active_interfaces().unwrap_or_default();
-    for iface in interfaces {
-        let lower = iface.to_ascii_lowercase();
-        if lower.starts_with("wwan") || lower.starts_with("wwp") || lower.contains("mbim") {
-            if let Ok((rx, tx)) = read_interface_stats(&iface, Some(&app.dbus_conn)).await {
-                return (rx, tx);
-            }
-        }
-    }
-    (0, 0)
-}
-
 pub async fn get_package_usage_handler(State(app): State<AppState>) -> impl IntoResponse {
     let config = app.config_manager.get_package_usage();
-    let (rx, tx) = current_wwan_bytes(&app).await;
-    let local_delta = rx
-        .saturating_sub(config.baseline_rx_bytes)
-        .saturating_add(tx.saturating_sub(config.baseline_tx_bytes));
-    let general_used = config.general_used_bytes.saturating_add(local_delta);
+    let general_used = config.general_used_bytes;
     let data = PackageUsageResponse {
         enabled: config.enabled,
         calibrated_at: config.calibrated_at,
@@ -3654,7 +3637,7 @@ pub async fn get_package_usage_handler(State(app): State<AppState>) -> impl Into
         directed_remaining_bytes: config
             .directed_total_bytes
             .saturating_sub(config.directed_used_bytes),
-        estimated: config.enabled,
+        estimated: false,
     };
     (
         StatusCode::OK,
@@ -3666,15 +3649,14 @@ pub async fn calibrate_package_usage_handler(
     State(app): State<AppState>,
     Json(payload): Json<PackageUsageCalibrationRequest>,
 ) -> impl IntoResponse {
-    let (rx, tx) = current_wwan_bytes(&app).await;
     let mut config = app.config_manager.get_package_usage();
     config.enabled = true;
     config.general_total_bytes = payload.general_total_bytes;
     config.general_used_bytes = payload.general_used_bytes;
     config.directed_total_bytes = payload.directed_total_bytes;
     config.directed_used_bytes = payload.directed_used_bytes;
-    config.baseline_rx_bytes = rx;
-    config.baseline_tx_bytes = tx;
+    config.baseline_rx_bytes = 0;
+    config.baseline_tx_bytes = 0;
     config.calibrated_at = Some(chrono::Utc::now().to_rfc3339());
     if let Err(error) = app.config_manager.set_package_usage(config) {
         return (
