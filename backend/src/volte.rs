@@ -592,6 +592,7 @@ async fn register_native_ims(
             return Err(error);
         }
     };
+    log_register_response_metadata("authenticated", &registered);
     if crate::ims_sip::sip_status_code(&registered) != Some(200) {
         crate::ims_ipsec::uninstall_plan(&xfrm_plan).await;
         return Err(anyhow!(
@@ -605,6 +606,9 @@ async fn register_native_ims(
     }
     let refresh_after = crate::ims_sip::registration_refresh_delay(&registered);
     let service_routes = crate::ims_sip::service_routes(&registered);
+    if let Some(associated_uri) = crate::ims_sip::associated_uri(&registered) {
+        registration.public_identity = associated_uri;
+    }
     Ok(NativeImsRegistration {
         channel,
         xfrm_plan,
@@ -624,6 +628,7 @@ fn log_register_response_metadata(stage: &str, response: &str) {
         security_server = crate::ims_sip::has_header(response, "Security-Server"),
         contact = crate::ims_sip::has_header(response, "Contact"),
         service_route = crate::ims_sip::has_header(response, "Service-Route"),
+        associated_uri = crate::ims_sip::has_header(response, "P-Associated-URI"),
         expires = crate::ims_sip::has_header(response, "Expires"),
         warning = crate::ims_sip::has_header(response, "Warning"),
         sensitive_values = "redacted",

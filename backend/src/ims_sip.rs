@@ -341,6 +341,36 @@ pub fn service_routes(response: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn associated_uri(response: &str) -> Option<String> {
+    for line in response.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("p-associated-uri") {
+            continue;
+        }
+        let mut remainder = value;
+        while let Some(start) = remainder.find('<') {
+            let after_start = &remainder[start + 1..];
+            let Some(end) = after_start.find('>') else {
+                break;
+            };
+            let uri = after_start[..end].trim();
+            if uri.starts_with("sip:") || uri.starts_with("sips:") || uri.starts_with("tel:") {
+                return Some(uri.to_string());
+            }
+            remainder = &after_start[end + 1..];
+        }
+        for entry in value.split(',') {
+            let uri = entry.trim().trim_matches(['<', '>']);
+            if uri.starts_with("sip:") || uri.starts_with("sips:") || uri.starts_with("tel:") {
+                return Some(uri.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityServer {
     pub client_spi: u32,
@@ -834,6 +864,19 @@ mod tests {
                 "<sip:[2001:db8::1]:5060;lr>",
                 "<sip:[2001:db8::2]:5060;lr>"
             ]
+        );
+    }
+
+    #[test]
+    fn uses_first_registered_associated_identity() {
+        let response = "SIP/2.0 200 OK\r\nP-Associated-URI: <sip:+8613800138000@ims.example;user=phone>, <tel:+8613800138000>\r\n\r\n";
+        assert_eq!(
+            associated_uri(response).as_deref(),
+            Some("sip:+8613800138000@ims.example;user=phone")
+        );
+        assert_eq!(
+            associated_uri("P-Associated-URI: tel:+8613800138000\r\n").as_deref(),
+            Some("tel:+8613800138000")
         );
     }
 }
