@@ -3,7 +3,6 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::net::UdpSocket;
 
 use crate::db::{beijing_sms_now_string, Database, SmsMessage};
 use crate::notification::NotificationSender;
@@ -298,18 +297,14 @@ pub fn build_rp_ack_message(
 }
 
 pub async fn run_ims_sms_listener(
-    local: std::net::Ipv6Addr,
-    port: u16,
+    channel: crate::ims_channel::ImsSipChannel,
     database: Arc<Database>,
     notifications: Arc<NotificationSender>,
 ) -> Result<()> {
-    let socket = UdpSocket::bind((local, port)).await?;
-    let mut buffer = vec![0u8; 8192];
     let mut multipart: HashMap<(String, u16), Vec<Option<IncomingImsSms>>> = HashMap::new();
     loop {
-        let (length, peer) = socket.recv_from(&mut buffer).await?;
-        let packet = &buffer[..length];
-        let Ok((headers, body)) = parse_sip_message(packet) else {
+        let packet = channel.receive(std::time::Duration::from_secs(3600)).await?;
+        let Ok((headers, body)) = parse_sip_message(&packet) else {
             continue;
         };
         let is_message = packet
@@ -325,10 +320,13 @@ pub async fn run_ims_sms_listener(
             continue;
         }
         let response = sip_ok_response(&headers);
-        let _ = socket.send_to(response.as_bytes(), peer).await;
+        let _ = channel.send(response.as_bytes()).await;
         if let Ok(ack) = build_rp_ack(&body) {
-            if let Ok(packet) = build_rp_ack_message(&headers, local, port, &ack) {
-                let _ = socket.send_to(&packet, peer).await;
+            let route = channel.route();
+            if let std::net::IpAddr::V6(local) = route.local.ip() {
+                if let Ok(packet) = build_rp_ack_message(&headers, local, route.local.port(), &ack) {
+                    let _ = channel.send(&packet).await;
+                }
             }
         }
         let Ok(mut incoming) = decode_ims_sms_body(&body) else {

@@ -283,10 +283,7 @@ pub struct SecurityServer {
 }
 
 pub fn parse_security_server(response: &str) -> Option<SecurityServer> {
-    let header = response
-        .lines()
-        .find(|line| line.to_ascii_lowercase().starts_with("security-server:"))?;
-    let value = header.split_once(':')?.1;
+    let value = security_server_value(response)?;
     let parameter = |name: &str| {
         value.split(';').find_map(|item| {
             let (key, value) = item.trim().split_once('=')?;
@@ -297,9 +294,11 @@ pub fn parse_security_server(response: &str) -> Option<SecurityServer> {
     };
     let parse_u32 = |name: &str| {
         let value = parameter(name)?;
-        u32::from_str_radix(value.trim_start_matches("0x"), 16)
-            .or_else(|_| value.parse())
-            .ok()
+        value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+            .map(|hex| u32::from_str_radix(hex, 16).ok())
+            .unwrap_or_else(|| value.parse().ok())
     };
     Some(SecurityServer {
         client_spi: parse_u32("spi-c")?,
@@ -307,6 +306,14 @@ pub fn parse_security_server(response: &str) -> Option<SecurityServer> {
         client_port: parameter("port-c")?.parse().ok()?,
         server_port: parameter("port-s")?.parse().ok()?,
     })
+}
+
+pub fn security_server_value(response: &str) -> Option<&str> {
+    response
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("security-server:"))?
+        .split_once(':')
+        .map(|(_, value)| value.trim())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,6 +352,27 @@ pub fn build_register_with_security(
     secured.push_str(security_header);
     secured.push_str(&request[position..]);
     Ok(secured)
+}
+
+pub fn build_initial_register_with_security(
+    registration: &SipRegistration,
+    branch: &str,
+    security_header: &str,
+) -> Result<String> {
+    let request = build_initial_register(registration, branch)?;
+    insert_before_content_length(&request, security_header)
+}
+
+fn insert_before_content_length(request: &str, header: &str) -> Result<String> {
+    let marker = "Content-Length: 0\r\n";
+    let position = request
+        .find(marker)
+        .ok_or_else(|| anyhow!("SIP content length header is missing"))?;
+    let mut result = String::with_capacity(request.len() + header.len());
+    result.push_str(&request[..position]);
+    result.push_str(header);
+    result.push_str(&request[position..]);
+    Ok(result)
 }
 
 pub fn parse_aka_challenge(response: &str) -> Option<AkaChallenge> {
@@ -659,5 +687,13 @@ mod tests {
                 server_port: 5060
             })
         );
+    }
+
+    #[test]
+    fn parses_decimal_security_server_spis_as_decimal() {
+        let response = "Security-Server: ipsec-3gpp;spi-c=12345678;spi-s=87654321;port-c=5062;port-s=5060\r\n";
+        let security = parse_security_server(response).unwrap();
+        assert_eq!(security.client_spi, 12_345_678);
+        assert_eq!(security.server_spi, 87_654_321);
     }
 }
