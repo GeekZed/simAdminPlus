@@ -406,6 +406,9 @@ async fn register_native_ims(
         channel.route().local.port(),
         receive_port,
     )?;
+    let security_offer = crate::ims_sip::required_sec_agree_headers(
+        &ue_security.security_client_header(),
+    );
     let mut registration = crate::ims_sip::SipRegistration {
         private_identity,
         public_identity,
@@ -432,7 +435,7 @@ async fn register_native_ims(
     let initial = crate::ims_sip::build_initial_register_with_security(
         &registration,
         "z9hG4bK-simadmin",
-        &ue_security.security_client_header(),
+        &security_offer,
     )?;
     channel.send(initial.as_bytes()).await?;
     let mut challenge_response = String::from_utf8(
@@ -443,7 +446,7 @@ async fn register_native_ims(
         let deregister = crate::ims_sip::build_initial_register_with_security(
             &registration,
             "z9hG4bK-simadmin-clear-binding",
-            &format!("{}Expires: 0\r\n", ue_security.security_client_header()),
+            &format!("{security_offer}Expires: 0\r\n"),
         )?;
         channel.send(deregister.as_bytes()).await?;
         let deregister_response = String::from_utf8(
@@ -456,7 +459,7 @@ async fn register_native_ims(
             let retry = crate::ims_sip::build_initial_register_with_security(
                 &registration,
                 "z9hG4bK-simadmin-after-clear",
-                &ue_security.security_client_header(),
+                &security_offer,
             )?;
             channel.send(retry.as_bytes()).await?;
             challenge_response = String::from_utf8(
@@ -502,8 +505,7 @@ async fn register_native_ims(
                     registration.nonce_count,
                 )?;
                 let headers = format!(
-                    "{authorization}\r\n{}",
-                    ue_security.security_client_header()
+                    "{authorization}\r\n{security_offer}"
                 );
                 let request = crate::ims_sip::build_initial_register_with_security(
                     &registration,
@@ -562,7 +564,7 @@ async fn register_native_ims(
     registration.contact_port = ue_security.port_c;
     let security_header = format!(
         "{}Security-Verify: {}\r\n",
-        ue_security.security_client_header(),
+        security_offer,
         channel.security_verify().unwrap_or_default()
     );
     let authenticated = crate::ims_sip::build_register_with_security(

@@ -403,6 +403,12 @@ pub fn build_initial_register_with_security(
     insert_before_content_length(&request, security_header)
 }
 
+pub fn required_sec_agree_headers(security_client: &str) -> String {
+    format!(
+        "Supported: path, gruu, sec-agree\r\nRequire: sec-agree\r\nProxy-Require: sec-agree\r\n{security_client}"
+    )
+}
+
 fn insert_before_content_length(request: &str, header: &str) -> Result<String> {
     let marker = "Content-Length: 0\r\n";
     let position = request
@@ -735,6 +741,14 @@ mod tests {
         let security = parse_security_server(response).unwrap();
         assert_eq!(security.client_spi, 12_345_678);
         assert_eq!(security.server_spi, 87_654_321);
+    }
+
+    #[test]
+    fn required_ipsec_offer_forces_security_agreement() {
+        let headers = required_sec_agree_headers("Security-Client: ipsec-3gpp\r\n");
+        assert!(headers.contains("Supported: path, gruu, sec-agree\r\n"));
+        assert!(headers.contains("Require: sec-agree\r\n"));
+        assert!(headers.contains("Proxy-Require: sec-agree\r\n"));
     }
 
     #[test]
