@@ -946,7 +946,11 @@ pub async fn run_secondary_ims_bearer_supervisor(
             Ok(true) => {
                 tokio::time::sleep(Duration::from_secs(10)).await;
             }
-            Ok(false) | Err(_) => {
+            Err(error) => {
+                tracing::warn!(error = %error, "secondary IMS bearer status was inconclusive; retaining registered session");
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            Ok(false) => {
                 if let Some(listener) = sms_listener.take() {
                     listener.abort();
                 }
