@@ -96,7 +96,7 @@ fn state_add_args(state: &XfrmState) -> Vec<String> {
         "dst".into(), state.dst.to_string(), "proto".into(), "esp".into(), "spi".into(),
         format!("0x{:08x}", state.spi), "mode".into(), "transport".into(),
         "auth-trunc".into(), "hmac(md5)".into(), state.auth_key_hex.clone(), "96".into(),
-        "enc".into(), "ecb(cipher_null)".into(),
+        "enc".into(), "ecb(cipher_null)".into(), String::new(),
     ]
 }
 
@@ -188,6 +188,17 @@ mod tests {
             security(1, 2, 5062, 5064).security_client_header(),
             "Security-Client: ipsec-3gpp;alg=hmac-md5-96;ealg=null;prot=esp;mod=trans;spi-c=1;spi-s=2;port-c=5062;port-s=5064\r\n"
         );
+    }
+
+    #[test]
+    fn null_cipher_supplies_empty_keymat_argument() {
+        let args = state_add_args(&XfrmState {
+            src: "2001:db8::1".parse().unwrap(),
+            dst: "2001:db8::2".parse().unwrap(),
+            spi: 1,
+            auth_key_hex: "0x00112233445566778899aabbccddeeff".into(),
+        });
+        assert_eq!(&args[args.len() - 3..], &["enc", "ecb(cipher_null)", ""]);
     }
 
     #[test]
