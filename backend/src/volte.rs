@@ -441,6 +441,7 @@ async fn register_native_ims(
     let mut challenge_response = String::from_utf8(
         channel.receive(Duration::from_secs(10)).await?,
     )?;
+    log_register_response_metadata("initial", &challenge_response);
     if crate::ims_sip::sip_status_code(&challenge_response) == Some(200) {
         registration.cseq = registration.cseq.saturating_add(1);
         let deregister = crate::ims_sip::build_initial_register_with_security(
@@ -452,6 +453,7 @@ async fn register_native_ims(
         let deregister_response = String::from_utf8(
             channel.receive(Duration::from_secs(10)).await?,
         )?;
+        log_register_response_metadata("clear_binding", &deregister_response);
         if matches!(crate::ims_sip::sip_status_code(&deregister_response), Some(401 | 407)) {
             challenge_response = deregister_response;
         } else if crate::ims_sip::sip_status_code(&deregister_response) == Some(200) {
@@ -465,6 +467,7 @@ async fn register_native_ims(
             challenge_response = String::from_utf8(
                 channel.receive(Duration::from_secs(10)).await?,
             )?;
+            log_register_response_metadata("after_clear", &challenge_response);
         } else {
             return Err(anyhow!(
                 "IMS stale-binding cleanup returned {:?}",
@@ -610,6 +613,22 @@ async fn register_native_ims(
         service_routes,
         refresh_after,
     })
+}
+
+fn log_register_response_metadata(stage: &str, response: &str) {
+    tracing::info!(
+        stage,
+        sip_status = ?crate::ims_sip::sip_status_code(response),
+        aka_challenge = crate::ims_sip::has_header(response, "WWW-Authenticate")
+            || crate::ims_sip::has_header(response, "Proxy-Authenticate"),
+        security_server = crate::ims_sip::has_header(response, "Security-Server"),
+        contact = crate::ims_sip::has_header(response, "Contact"),
+        service_route = crate::ims_sip::has_header(response, "Service-Route"),
+        expires = crate::ims_sip::has_header(response, "Expires"),
+        warning = crate::ims_sip::has_header(response, "Warning"),
+        sensitive_values = "redacted",
+        "IMS REGISTER response metadata"
+    );
 }
 
 pub async fn secondary_ims_bearer_connected(

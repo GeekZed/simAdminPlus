@@ -203,10 +203,14 @@ pub fn build_register(registration: &SipRegistration, branch: &str) -> Result<St
     let contact_identity = registration
         .public_identity
         .strip_prefix("sip:")
-        .unwrap_or(&registration.public_identity);
+        .unwrap_or(&registration.public_identity)
+        .split('@')
+        .next()
+        .unwrap_or(&registration.private_identity);
+    let contact_host = format!("[{}]", registration.contact_host);
     let contact = format!(
-        "sip:{}@{}:{}",
-        contact_identity, registration.contact_host, registration.contact_port
+        "sip:{}@{}:{};transport=udp",
+        contact_identity, contact_host, registration.contact_port
     );
 
     Ok(format!(
@@ -216,7 +220,11 @@ From: <{}>;tag=simadmin\r\n\
 To: <{}>\r\n\
 Call-ID: {}\r\n\
 CSeq: {} REGISTER\r\n\
-Contact: <{}>\r\n\
+Contact: <{}>;+g.3gpp.smsip;expires=3600\r\n\
+Expires: 3600\r\n\
+P-Preferred-Identity: <{}>\r\n\
+P-Access-Network-Info: 3GPP-E-UTRAN-FDD\r\n\
+P-Visited-Network-ID: \"{}\"\r\n\
 Max-Forwards: 70\r\n\
 User-Agent: SimAdmin\r\n\
 {authorization}\r\n\
@@ -227,7 +235,9 @@ Content-Length: 0\r\n\r\n",
         registration.public_identity,
         registration.call_id,
         registration.cseq,
-        contact
+        contact,
+        registration.public_identity,
+        registration.realm
     ))
 }
 
@@ -239,10 +249,14 @@ pub fn build_initial_register(registration: &SipRegistration, branch: &str) -> R
     let contact_identity = registration
         .public_identity
         .strip_prefix("sip:")
-        .unwrap_or(&registration.public_identity);
+        .unwrap_or(&registration.public_identity)
+        .split('@')
+        .next()
+        .unwrap_or(&registration.private_identity);
+    let contact_host = format!("[{}]", registration.contact_host);
     let contact = format!(
-        "sip:{}@{}:{}",
-        contact_identity, registration.contact_host, registration.contact_port
+        "sip:{}@{}:{};transport=udp",
+        contact_identity, contact_host, registration.contact_port
     );
     Ok(format!(
         "REGISTER {uri} SIP/2.0\r\n\
@@ -251,7 +265,11 @@ From: <{}>;tag=simadmin\r\n\
 To: <{}>\r\n\
 Call-ID: {}\r\n\
 CSeq: {} REGISTER\r\n\
-Contact: <{}>\r\n\
+Contact: <{}>;+g.3gpp.smsip;expires=3600\r\n\
+Expires: 3600\r\n\
+P-Preferred-Identity: <{}>\r\n\
+P-Access-Network-Info: 3GPP-E-UTRAN-FDD\r\n\
+P-Visited-Network-ID: \"{}\"\r\n\
 Max-Forwards: 70\r\n\
 User-Agent: SimAdmin\r\n\
 Content-Length: 0\r\n\r\n",
@@ -261,8 +279,17 @@ Content-Length: 0\r\n\r\n",
         registration.public_identity,
         registration.call_id,
         registration.cseq,
-        contact
+        contact,
+        registration.public_identity,
+        registration.realm
     ))
+}
+
+pub fn has_header(message: &str, header_name: &str) -> bool {
+    message.lines().any(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case(header_name))
+    })
 }
 
 pub fn sip_status_code(response: &str) -> Option<u16> {
@@ -625,6 +652,46 @@ mod tests {
         .unwrap();
         assert!(request.starts_with("REGISTER sip:ims.example SIP/2.0"));
         assert!(request.contains("algorithm=AKAv1-MD5"));
+        assert!(request.contains(";+g.3gpp.smsip;expires=3600\r\n"));
+        assert!(request.contains("P-Access-Network-Info: 3GPP-E-UTRAN-FDD\r\n"));
+        assert!(request.contains("P-Visited-Network-ID: \"ims.example\"\r\n"));
+    }
+
+    #[test]
+    fn initial_register_advertises_mt_sms_and_access_network() {
+        let mut registration = SipRegistration {
+            private_identity: "460001234567890@ims.example".into(),
+            public_identity: "sip:460001234567890@ims.example".into(),
+            realm: "ims.example".into(),
+            nonce: String::new(),
+            aka_res: Vec::new(),
+            digest_algorithm: "AKAv1-MD5".into(),
+            digest_qop: None,
+            digest_opaque: None,
+            digest_proxy: false,
+            cnonce: "cnonce".into(),
+            nonce_count: 1,
+            call_id: "call-id".into(),
+            cseq: 1,
+            contact_host: "2001:db8::10".parse().unwrap(),
+            contact_port: 5060,
+        };
+        let request = build_initial_register(&registration, "z9hG4bK-test").unwrap();
+        assert!(request.contains(
+            "Contact: <sip:460001234567890@[2001:db8::10]:5060;transport=udp>;+g.3gpp.smsip;expires=3600\r\n"
+        ));
+        assert!(request.contains("Expires: 3600\r\n"));
+        assert!(request.contains(
+            "P-Preferred-Identity: <sip:460001234567890@ims.example>\r\n"
+        ));
+        assert!(request.contains("P-Access-Network-Info: 3GPP-E-UTRAN-FDD\r\n"));
+        assert!(request.contains("P-Visited-Network-ID: \"ims.example\"\r\n"));
+
+        registration.realm = "other.example".into();
+        assert!(has_header(
+            &build_initial_register(&registration, "z9hG4bK-test-2").unwrap(),
+            "p-visited-network-id"
+        ));
     }
 
     #[test]
