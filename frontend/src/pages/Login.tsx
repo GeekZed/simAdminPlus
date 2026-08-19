@@ -477,7 +477,7 @@ export default function Login() {
 
               <Box sx={{ width: '100%', minHeight: 24, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <Link
-                  href="https://github.com/3899/SimAdmin"
+                  href="https://github.com/GeekZed/simAdminPlus"
                   target="_blank"
                   rel="noopener noreferrer"
                   underline="none"
@@ -526,14 +526,14 @@ export default function Login() {
           sx={{ fontSize: 13 }}
         >
           <Link
-            href="https://github.com/3899/SimAdmin"
+            href="https://github.com/GeekZed/simAdminPlus"
             target="_blank"
             rel="noopener noreferrer"
             underline="none"
             color="inherit"
             sx={{ '&:hover': { color: 'primary.main' } }}
           >
-            Copyright © 2026 GitHub 3899
+            Copyright © 2026 GeekZed · simAdminPlus
           </Link>
           <Typography component="span" color="text.disabled">|</Typography>
           <CommunityTooltip />

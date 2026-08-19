@@ -183,9 +183,11 @@ export default function DashboardPage() {
               dataStatus={data.dataStatus}
               airplaneMode={data.airplaneMode}
               roaming={data.roaming}
+              volte={data.volte}
               onToggleData={() => void actions.toggleData()}
               onToggleAirplaneMode={() => void actions.toggleAirplaneMode()}
               onToggleRoaming={() => void actions.toggleRoaming()}
+              onToggleVolte={() => void actions.toggleVolte()}
             />
           </Grid>
 

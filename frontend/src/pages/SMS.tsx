@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, type ChangeEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, type ChangeEvent, type MouseEvent, type ReactNode } from 'react'
 import {
   Box,
   Card,
@@ -30,11 +30,9 @@ import {
 import type { Theme } from '@mui/material/styles'
 import {
   Sms as SmsIcon,
-  Send,
   Refresh,
   Person,
   ArrowBack,
-  Add,
   Checklist,
   Delete,
   DeleteOutline,
@@ -157,14 +155,9 @@ export default function SMSPage() {
   const [messages, setMessages] = useState<SmsMessage[]>([])
   const [stats, setStats] = useState<SmsStats | null>(null)
   const [loading, setLoading] = useState(false)
-  const [sendLoading, setSendLoading] = useState(false)
   const [deleteLoading, setDeleteLoading] = useState(false)
-  const [phoneNumber, setPhoneNumber] = useState('')
-  const [content, setContent] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
-  const [newChatDialogOpen, setNewChatDialogOpen] = useState(false)
-  const [newChatNumber, setNewChatNumber] = useState('')
 
   // 对话状态
   const [conversations, setConversations] = useState<ConversationGroup[]>([])
@@ -367,61 +360,12 @@ export default function SMSPage() {
 
   const handleSelectConversation = (phone: string, scrollTargetId?: number) => {
     setSelectedConversation(phone)
-    setPhoneNumber(phone)
     void fetchConversation(phone, scrollTargetId)
   }
 
   const handleBackToList = () => {
     setSelectedConversation(null)
     setConversationMessages([])
-  }
-
-  const handleStartNewChat = () => {
-    if (!newChatNumber.trim()) {
-      setError('请输入电话号码')
-      return
-    }
-    setNewChatDialogOpen(false)
-    setSelectedConversation(newChatNumber)
-    setPhoneNumber(newChatNumber)
-    setConversationMessages([])
-    setNewChatNumber('')
-  }
-
-  const handleSend = async () => {
-    if (!phoneNumber.trim()) {
-      setError('请输入电话号码')
-      return
-    }
-    if (!content.trim()) {
-      setError('请输入短信内容')
-      return
-    }
-
-    setSendLoading(true)
-    setError(null)
-    setSuccess(null)
-
-    try {
-      const response = await api.sendSms(phoneNumber, content)
-      if (response.status === 'ok') {
-        setSuccess(`短信已发送到 ${phoneNumber}`)
-        setContent('')
-        setTimeout(() => {
-          void fetchMessages()
-          void fetchStats()
-          if (selectedConversation) {
-            void fetchConversation(selectedConversation)
-          }
-        }, 1000)
-      } else {
-        setError(response.message)
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setSendLoading(false)
-    }
   }
 
   const toggleConversationSelection = (phone: string) => {
@@ -716,7 +660,7 @@ export default function SMSPage() {
         </Paper>
         <Paper sx={{ p: 1, flex: 1, minWidth: 60, textAlign: 'center' }}>
           <Typography variant="h6" color="info.main" fontWeight={600}>{smsStats.outgoing}</Typography>
-          <Typography variant="caption" color="text.secondary">发送</Typography>
+          <Typography variant="caption" color="text.secondary">历史发送</Typography>
         </Paper>
         <Paper sx={{ p: 1, flex: 1, minWidth: 60, textAlign: 'center' }}>
           <Tooltip title={`推送成功 ${pushCount} 条，尝试推送 ${pushAttemptedCount} 条`}>
@@ -759,11 +703,6 @@ export default function SMSPage() {
             </>
           ) : (
             <>
-              <Tooltip title="新建对话">
-                <IconButton size="small" color="primary" onClick={() => setNewChatDialogOpen(true)}>
-                  <Add />
-                </IconButton>
-              </Tooltip>
               <Tooltip title="刷新">
                 <IconButton size="small" color="primary" onClick={() => void fetchMessages()} disabled={loading}>
                   <Refresh />
@@ -834,7 +773,7 @@ export default function SMSPage() {
       {loading && conversations.length === 0 ? (
         <Box display="flex" justifyContent="center" py={4}><CircularProgress /></Box>
       ) : conversations.length === 0 ? (
-        <Box p={2}><Alert severity="info">暂无对话，点击 + 开始新对话</Alert></Box>
+        <Box p={2}><Alert severity="info">暂无收到的短信</Alert></Box>
       ) : visibleConversations.length === 0 ? (
         <Box p={2}><Alert severity="info">未找到匹配的对话</Alert></Box>
       ) : (
@@ -966,7 +905,7 @@ export default function SMSPage() {
           <Box display="flex" justifyContent="center" py={4}><CircularProgress /></Box>
         ) : conversationMessages.length === 0 ? (
           <Box display="flex" justifyContent="center" alignItems="center" height="100%">
-            <Typography color="text.secondary">开始发送第一条消息</Typography>
+            <Typography color="text.secondary">暂无短信记录</Typography>
           </Box>
         ) : (
           <>
@@ -1060,48 +999,9 @@ export default function SMSPage() {
         )}
       </Box>
 
-      <Box
-        sx={{
-          p: 2,
-          borderTop: 1,
-          borderColor: 'divider',
-          bgcolor: 'background.paper',
-        }}
-      >
-        <TextField
-          fullWidth
-          multiline
-          maxRows={4}
-          value={content}
-          onChange={(e: ChangeEvent<HTMLInputElement>) => setContent(e.target.value)}
-          placeholder="输入短信内容..."
-          disabled={sendLoading}
-          onFocus={() => { inputFocusedRef.current = true }}
-          onBlur={() => { inputFocusedRef.current = false }}
-          onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              void handleSend()
-            }
-          }}
-          slotProps={{
-            input: {
-              endAdornment: (
-                <InputAdornment position="end">
-                  <IconButton
-                    color="primary"
-                    onClick={() => void handleSend()}
-                    disabled={sendLoading || !content.trim()}
-                  >
-                    {sendLoading ? <CircularProgress size={24} /> : <Send />}
-                  </IconButton>
-                </InputAdornment>
-              ),
-            },
-          }}
-        />
-        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
-          {content.length} 字符 | Enter 发送，Shift+Enter 换行
+      <Box sx={{ p: 1.5, borderTop: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
+        <Typography variant="caption" color="text.secondary">
+          仅接收短信；本页面不支持发送短信。
         </Typography>
       </Box>
     </Box>
@@ -1111,10 +1011,10 @@ export default function SMSPage() {
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', p: 4 }}>
       <SmsIcon sx={{ fontSize: 64, color: 'text.secondary', mb: 2 }} />
       <Typography variant="h6" color="text.secondary" gutterBottom>
-        选择一个对话开始聊天
+        选择一个对话查看短信
       </Typography>
       <Typography variant="body2" color="text.secondary">
-        或点击左上角 + 开始新对话
+        收到短信后会自动出现在这里
       </Typography>
     </Box>
   )
@@ -1176,29 +1076,6 @@ export default function SMSPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={newChatDialogOpen} onClose={() => setNewChatDialogOpen(false)}>
-        <DialogTitle>新建对话</DialogTitle>
-        <DialogContent>
-          <TextField
-            autoFocus
-            fullWidth
-            label="电话号码"
-            value={newChatNumber}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => setNewChatNumber(e.target.value)}
-            placeholder="输入收件人电话号码"
-            sx={{ mt: 1 }}
-            onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-              if (e.key === 'Enter') {
-                handleStartNewChat()
-              }
-            }}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setNewChatDialogOpen(false)}>取消</Button>
-          <Button onClick={handleStartNewChat} variant="contained">开始对话</Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   )
 }

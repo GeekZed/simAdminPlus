@@ -58,7 +58,24 @@ pub fn write_runtime_status(status: &RuntimeStatus) -> Result<()> {
 pub struct QmiBearerSettings {
     pub ipv6_address: String,
     pub ipv6_gateway: String,
+    pub ipv6_prefix: u8,
     pub mtu: Option<u32>,
+}
+
+#[derive(Debug)]
+struct ConfiguredImsNetwork {
+    netdev: String,
+    settings: QmiBearerSettings,
+    pcscf_routes: Vec<std::net::Ipv6Addr>,
+}
+
+struct NativeImsRegistration {
+    channel: crate::ims_channel::ImsSipChannel,
+    xfrm_plan: crate::ims_ipsec::XfrmPlan,
+    sip: crate::ims_sip::SipRegistration,
+    security_header: String,
+    service_routes: Vec<String>,
+    refresh_after: Duration,
 }
 
 /// Parse the stable fields emitted by `qmicli --wds-get-current-settings`.
@@ -75,12 +92,21 @@ pub fn parse_qmi_bearer_settings(output: &str) -> Option<QmiBearerSettings> {
             .map(str::to_string)
     };
 
-    let ipv6_address = value("IPv6 address:")?.split('/').next()?.to_string();
+    let address_value = value("IPv6 address:")?;
+    let mut address_parts = address_value.split('/');
+    let ipv6_address = address_parts.next()?.to_string();
+    let ipv6_prefix = address_parts
+        .next()
+        .and_then(|prefix| prefix.parse::<u8>().ok())
+        .or_else(|| value("IPv6 subnet prefix:").and_then(|prefix| prefix.parse().ok()))
+        .filter(|prefix| *prefix <= 128)
+        .unwrap_or(64);
     let ipv6_gateway = value("IPv6 gateway address:")?.split('/').next()?.to_string();
     let mtu = value("MTU:").and_then(|value| value.parse().ok());
     Some(QmiBearerSettings {
         ipv6_address,
         ipv6_gateway,
+        ipv6_prefix,
         mtu,
     })
 }
@@ -101,7 +127,7 @@ pub async fn configure_secondary_ipv6_interface(
         .ipv6_gateway
         .parse::<std::net::Ipv6Addr>()
         .map_err(|_| anyhow!("secondary IMS IPv6 gateway is invalid"))?;
-    let prefix = 64;
+    let prefix = settings.ipv6_prefix;
     for args in [
         vec![
             "link".to_string(),
@@ -140,6 +166,42 @@ pub async fn configure_secondary_ipv6_interface(
     Ok(())
 }
 
+async fn cleanup_secondary_ipv6_interface(network: &ConfiguredImsNetwork) {
+    let Ok(address) = network.settings.ipv6_address.parse::<std::net::Ipv6Addr>() else {
+        return;
+    };
+    let Ok(gateway) = network.settings.ipv6_gateway.parse::<std::net::Ipv6Addr>() else {
+        return;
+    };
+
+    for pcscf in &network.pcscf_routes {
+        let _ = Command::new("ip")
+            .args([
+                "-6",
+                "route",
+                "del",
+                &format!("{pcscf}/128"),
+                "via",
+                &gateway.to_string(),
+                "dev",
+                &network.netdev,
+            ])
+            .output()
+            .await;
+    }
+    let _ = Command::new("ip")
+        .args([
+            "-6",
+            "addr",
+            "del",
+            &format!("{}/{}", address, network.settings.ipv6_prefix),
+            "dev",
+            &network.netdev,
+        ])
+        .output()
+        .await;
+}
+
 pub fn parse_qmi_packet_handle(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let (label, value) = line.split_once(':')?;
@@ -150,6 +212,24 @@ pub fn parse_qmi_packet_handle(output: &str) -> Option<String> {
             None
         }
     })
+}
+
+pub fn parse_qmi_client_id(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        if label.trim() == "CID" {
+            let value = value.trim().trim_matches('\'');
+            (!value.is_empty()).then(|| value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+#[derive(Debug)]
+pub struct QmiPacketSession {
+    packet_handle: String,
+    client_id: String,
 }
 
 pub fn secondary_netdev(qmi_device: &str) -> String {
@@ -182,7 +262,7 @@ pub fn parse_qmi_connection_status(output: &str) -> Option<bool> {
 pub async fn start_secondary_ims_bearer(
     qmi_device: &str,
     apn: &str,
-) -> Result<(String, QmiBearerSettings)> {
+) -> Result<(QmiPacketSession, QmiBearerSettings)> {
     if qmi_device.trim().is_empty() || apn.trim().is_empty() {
         return Err(anyhow!("QMI device and IMS APN are required"));
     }
@@ -238,19 +318,29 @@ pub async fn start_secondary_ims_bearer(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let handle = parse_qmi_packet_handle(&stdout)
         .ok_or_else(|| anyhow!("qmicli did not return a packet data handle"))?;
+    let client_id = parse_qmi_client_id(&stdout)
+        .ok_or_else(|| anyhow!("qmicli did not return the retained WDS client ID"))?;
+    let session = QmiPacketSession {
+        packet_handle: handle,
+        client_id,
+    };
     let mut last_error = None;
     for _ in 0..5 {
-        match read_secondary_bearer_settings(qmi_device).await {
-            Ok(settings) => return Ok((handle, settings)),
+        match read_secondary_bearer_settings(qmi_device, &session).await {
+            Ok(settings) => return Ok((session, settings)),
             Err(error) => last_error = Some(error),
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    let _ = stop_secondary_ims_bearer(qmi_device, &handle).await;
+    let _ = stop_secondary_ims_bearer(qmi_device, &session).await;
     Err(last_error.unwrap_or_else(|| anyhow!("secondary IMS bearer settings unavailable")))
 }
 
-pub async fn read_secondary_bearer_settings(qmi_device: &str) -> Result<QmiBearerSettings> {
+pub async fn read_secondary_bearer_settings(
+    qmi_device: &str,
+    session: &QmiPacketSession,
+) -> Result<QmiBearerSettings> {
+    let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(15),
         Command::new("qmicli")
@@ -261,6 +351,8 @@ pub async fn read_secondary_bearer_settings(qmi_device: &str) -> Result<QmiBeare
                 "--device-open-proxy",
                 "--device-open-qmi",
                 "--device-open-net=net-raw-ip|net-no-qos-header",
+                &cid_arg,
+                "--client-no-release-cid",
                 "--wds-get-current-settings",
             ])
             .output(),
@@ -279,40 +371,56 @@ pub async fn read_secondary_bearer_settings(qmi_device: &str) -> Result<QmiBeare
         .ok_or_else(|| anyhow!("secondary IMS bearer did not provide IPv6 settings"))
 }
 
-pub async fn register_native_ims(
+async fn register_native_ims(
     conn: &Connection,
     settings: &QmiBearerSettings,
     pcscf: std::net::Ipv6Addr,
-) -> Result<()> {
+    netdev: &str,
+) -> Result<NativeImsRegistration> {
     let local: std::net::Ipv6Addr = settings
         .ipv6_address
         .parse()
         .map_err(|_| anyhow!("IMS bearer IPv6 address is invalid"))?;
-    let modem_path = crate::modem_manager::find_modem_path(conn)
-        .await
-        .map_err(|error| anyhow!("cannot find modem for IMS AKA: {error}"))?;
     let identity = crate::modem_manager::current_sim_identity(conn)
         .await
         .ok_or_else(|| anyhow!("IMS modem identity is unavailable"))?;
     if identity.imsi.is_empty() {
         return Err(anyhow!("IMS modem IMSI is unavailable"));
     }
-    let domain = std::env::var("SIMADMIN_IMS_DOMAIN").unwrap_or_else(|_| {
-        let mcc = &identity.imsi[..3.min(identity.imsi.len())];
-        let mnc = if identity.imsi.len() >= 6 {
-            &identity.imsi[3..6]
-        } else {
-            "000"
-        };
-        format!("ims.mnc{mnc}.mcc{mcc}.3gppnetwork.org")
-    });
+    let home_plmn =
+        crate::ims_identity::resolve_home_plmn(&identity.imsi, Some(&identity.operator_id), None)?;
+    let ims_identity = crate::ims_identity::derive_identity(&identity.imsi, &home_plmn);
+    let domain = std::env::var("SIMADMIN_IMS_DOMAIN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(ims_identity.home_domain);
+    let private_identity = format!("{}@{}", identity.imsi, domain);
     let public_identity = format!("sip:{}@{}", identity.imsi, domain);
+    let route = crate::ims_channel::SipRoute {
+        local: std::net::SocketAddr::new(local.into(), 0),
+        remote: std::net::SocketAddr::new(pcscf.into(), 5060),
+    };
+    let mut channel = crate::ims_channel::ImsSipChannel::bind(route, Some(netdev))?;
+    let receive_port = channel.reserve_security_receive_port()?;
+    let ue_security = crate::ims_ipsec::generate_ue_security(
+        channel.route().local.port(),
+        receive_port,
+    )?;
+    let security_offer = crate::ims_sip::required_sec_agree_headers(
+        &ue_security.security_client_header(),
+    );
     let mut registration = crate::ims_sip::SipRegistration {
-        private_identity: identity.imsi.clone(),
+        private_identity,
         public_identity,
         realm: domain,
         nonce: String::new(),
-        aka_res_hex: String::new(),
+        aka_res: Vec::new(),
+        digest_algorithm: "AKAv1-MD5".to_string(),
+        digest_qop: None,
+        digest_opaque: None,
+        digest_proxy: false,
+        cnonce: format!("{:x}", md5::compute(format!("{}:cnonce", identity.imsi))),
+        nonce_count: 1,
         call_id: format!(
             "simadmin-{}",
             std::time::SystemTime::now()
@@ -322,80 +430,217 @@ pub async fn register_native_ims(
         ),
         cseq: 1,
         contact_host: local,
-        contact_port: 5062,
+        contact_port: channel.route().local.port(),
     };
-    let initial = crate::ims_sip::build_initial_register(&registration, "z9hG4bK-simadmin")?;
-    let challenge_response = crate::ims_sip::send_udp_request_from_port(
-        local,
-        5062,
-        pcscf,
-        5060,
-        &initial,
-    )
-    .await?;
-    if crate::ims_sip::sip_status_code(&challenge_response) != Some(401) {
+    let initial = crate::ims_sip::build_initial_register_with_security(
+        &registration,
+        "z9hG4bK-simadmin",
+        &security_offer,
+    )?;
+    channel.send(initial.as_bytes()).await?;
+    let mut challenge_response = String::from_utf8(
+        channel.receive(Duration::from_secs(10)).await?,
+    )?;
+    log_register_response_metadata("initial", &challenge_response);
+    if crate::ims_sip::sip_status_code(&challenge_response) == Some(200) {
+        registration.cseq = registration.cseq.saturating_add(1);
+        let deregister = crate::ims_sip::build_initial_register_with_security(
+            &registration,
+            "z9hG4bK-simadmin-clear-binding",
+            &format!("{security_offer}Expires: 0\r\n"),
+        )?;
+        channel.send(deregister.as_bytes()).await?;
+        let deregister_response = String::from_utf8(
+            channel.receive(Duration::from_secs(10)).await?,
+        )?;
+        log_register_response_metadata("clear_binding", &deregister_response);
+        if matches!(crate::ims_sip::sip_status_code(&deregister_response), Some(401 | 407)) {
+            challenge_response = deregister_response;
+        } else if crate::ims_sip::sip_status_code(&deregister_response) == Some(200) {
+            registration.cseq = registration.cseq.saturating_add(1);
+            let retry = crate::ims_sip::build_initial_register_with_security(
+                &registration,
+                "z9hG4bK-simadmin-after-clear",
+                &security_offer,
+            )?;
+            channel.send(retry.as_bytes()).await?;
+            challenge_response = String::from_utf8(
+                channel.receive(Duration::from_secs(10)).await?,
+            )?;
+            log_register_response_metadata("after_clear", &challenge_response);
+        } else {
+            return Err(anyhow!(
+                "IMS stale-binding cleanup returned {:?}",
+                crate::ims_sip::sip_status_code(&deregister_response)
+            ));
+        }
+    }
+    if !matches!(
+        crate::ims_sip::sip_status_code(&challenge_response),
+        Some(401 | 407)
+    ) {
         return Err(anyhow!(
             "IMS initial REGISTER returned {:?}",
             crate::ims_sip::sip_status_code(&challenge_response)
         ));
     }
-    let challenge = crate::ims_sip::parse_aka_challenge(&challenge_response)
+    let mut challenge = crate::ims_sip::parse_aka_challenge(&challenge_response)
         .ok_or_else(|| anyhow!("IMS 401 did not contain an AKA challenge"))?;
-    let security = crate::ims_sip::parse_security_server(&challenge_response)
+    let mut security = crate::ims_sip::parse_security_server(&challenge_response)
         .ok_or_else(|| anyhow!("IMS 401 did not contain Security-Server"))?;
-    let aka_command = crate::ims_uim::build_aka_auth_command(&challenge.nonce)?;
-    let aka_output = crate::modem_manager::send_at_command(conn, &modem_path, &aka_command)
-        .await
-        .map_err(|error| anyhow!("IMS AKA APDU failed: {error}"))?;
-    let aka_hex = crate::ims_uim::extract_csim_hex(&aka_output)?;
-    let aka = crate::ims_uim::parse_aka_response(&aka_hex)?
-        .map_err(|_| anyhow!("IMS AKA requested AUTS resynchronization"))?;
-    let ik_hex = crate::ims_uim::encode_hex(&aka.ik);
-    crate::ims_ipsec::install_bidirectional_esp(
-        local,
-        pcscf,
-        security.client_spi,
-        security.server_spi,
-        &ik_hex,
-        security.client_port,
-        security.client_port,
-        security.server_port,
-        security.server_port,
-    )
-    .await?;
+    let mut security_verify = crate::ims_sip::security_server_value(&challenge_response)
+        .ok_or_else(|| anyhow!("IMS Security-Server value is unavailable"))?
+        .to_string();
+    let mut resync_attempted = false;
+    let aka = loop {
+        match crate::ims_uim::authenticate_via_qmi(&challenge.nonce).await? {
+            Ok(aka) => break aka,
+            Err(resync) if !resync_attempted => {
+                resync_attempted = true;
+                registration.cseq = registration.cseq.saturating_add(1);
+                registration.realm = challenge.realm.clone();
+                let authorization = crate::ims_sip::build_resync_authorization_header(
+                    &challenge,
+                    &registration.private_identity,
+                    &format!("sip:{}", registration.realm),
+                    &resync.auts,
+                    &registration.cnonce,
+                    registration.nonce_count,
+                )?;
+                let headers = format!(
+                    "{authorization}\r\n{security_offer}"
+                );
+                let request = crate::ims_sip::build_initial_register_with_security(
+                    &registration,
+                    "z9hG4bK-simadmin-auts",
+                    &headers,
+                )?;
+                channel.send(request.as_bytes()).await?;
+                let response = String::from_utf8(
+                    channel.receive(Duration::from_secs(10)).await?,
+                )?;
+                if !matches!(crate::ims_sip::sip_status_code(&response), Some(401 | 407)) {
+                    return Err(anyhow!(
+                        "IMS AUTS REGISTER returned {:?}",
+                        crate::ims_sip::sip_status_code(&response)
+                    ));
+                }
+                challenge = crate::ims_sip::parse_aka_challenge(&response)
+                    .ok_or_else(|| anyhow!("IMS AUTS response did not contain a new AKA challenge"))?;
+                security = crate::ims_sip::parse_security_server(&response)
+                    .ok_or_else(|| anyhow!("IMS AUTS response did not contain Security-Server"))?;
+                security_verify = crate::ims_sip::security_server_value(&response)
+                    .ok_or_else(|| anyhow!("IMS AUTS Security-Server value is unavailable"))?
+                    .to_string();
+            }
+            Err(_) => return Err(anyhow!("IMS AKA synchronization failed twice")),
+        }
+    };
+    let pcscf_security = crate::ims_ipsec::SecAgree {
+        spi_c: security.client_spi,
+        spi_s: security.server_spi,
+        port_c: security.client_port,
+        port_s: security.server_port,
+    };
+    let xfrm_plan = crate::ims_ipsec::build_plan(local, pcscf, ue_security, pcscf_security, &aka.ik)?;
+    crate::ims_ipsec::install_plan(&xfrm_plan).await?;
+    if let Err(error) = channel.activate_security(
+        crate::ims_channel::SipRoute {
+            local: std::net::SocketAddr::new(local.into(), ue_security.port_c),
+            remote: std::net::SocketAddr::new(pcscf.into(), pcscf_security.port_s),
+        },
+        std::net::SocketAddr::new(local.into(), ue_security.port_s),
+        std::net::SocketAddr::new(pcscf.into(), pcscf_security.port_c),
+        security_verify,
+    ) {
+        crate::ims_ipsec::uninstall_plan(&xfrm_plan).await;
+        return Err(error);
+    }
     registration.realm = challenge.realm;
     registration.nonce = challenge.nonce;
-    registration.aka_res_hex = crate::ims_uim::encode_hex(&aka.res);
-    registration.cseq = 2;
-    let security_header = crate::ims_sip::build_security_client_header(
-        security.client_spi,
-        security.server_spi,
-        security.client_port,
-        security.server_port,
+    registration.digest_algorithm = challenge.algorithm;
+    registration.digest_qop = challenge.qop;
+    registration.digest_opaque = challenge.opaque;
+    registration.digest_proxy = challenge.proxy;
+    registration.aka_res = aka.res;
+    registration.cseq = registration.cseq.saturating_add(1);
+    registration.contact_port = ue_security.port_c;
+    let security_header = format!(
+        "{}Security-Verify: {}\r\n",
+        security_offer,
+        channel.security_verify().unwrap_or_default()
     );
     let authenticated = crate::ims_sip::build_register_with_security(
         &registration,
         "z9hG4bK-simadmin-auth",
         &security_header,
     )?;
-    let registered = crate::ims_sip::send_udp_request_from_port(
-        local,
-        security.client_port,
-        pcscf,
-        security.server_port,
-        &authenticated,
-    )
-    .await?;
+    if let Err(error) = channel.send(authenticated.as_bytes()).await {
+        crate::ims_ipsec::uninstall_plan(&xfrm_plan).await;
+        return Err(error);
+    }
+    let registered = match channel.receive(Duration::from_secs(10)).await {
+        Ok(response) => match String::from_utf8(response) {
+            Ok(response) => response,
+            Err(error) => {
+                crate::ims_ipsec::uninstall_plan(&xfrm_plan).await;
+                return Err(error.into());
+            }
+        },
+        Err(error) => {
+            crate::ims_ipsec::uninstall_plan(&xfrm_plan).await;
+            return Err(error);
+        }
+    };
+    log_register_response_metadata("authenticated", &registered);
     if crate::ims_sip::sip_status_code(&registered) != Some(200) {
+        crate::ims_ipsec::uninstall_plan(&xfrm_plan).await;
         return Err(anyhow!(
             "IMS authenticated REGISTER returned {:?}",
             crate::ims_sip::sip_status_code(&registered)
         ));
     }
-    Ok(())
+    if crate::ims_sip::registration_expires(&registered) == 0 {
+        crate::ims_ipsec::uninstall_plan(&xfrm_plan).await;
+        return Err(anyhow!("IMS REGISTER response expired the binding"));
+    }
+    let refresh_after = crate::ims_sip::registration_refresh_delay(&registered);
+    let service_routes = crate::ims_sip::service_routes(&registered);
+    if let Some(associated_uri) = crate::ims_sip::associated_uri(&registered) {
+        registration.public_identity = associated_uri;
+    }
+    Ok(NativeImsRegistration {
+        channel,
+        xfrm_plan,
+        sip: registration,
+        security_header,
+        service_routes,
+        refresh_after,
+    })
 }
 
-pub async fn secondary_ims_bearer_connected(qmi_device: &str) -> Result<bool> {
+fn log_register_response_metadata(stage: &str, response: &str) {
+    tracing::info!(
+        stage,
+        sip_status = ?crate::ims_sip::sip_status_code(response),
+        aka_challenge = crate::ims_sip::has_header(response, "WWW-Authenticate")
+            || crate::ims_sip::has_header(response, "Proxy-Authenticate"),
+        security_server = crate::ims_sip::has_header(response, "Security-Server"),
+        contact = crate::ims_sip::has_header(response, "Contact"),
+        service_route = crate::ims_sip::has_header(response, "Service-Route"),
+        associated_uri = crate::ims_sip::has_header(response, "P-Associated-URI"),
+        expires = crate::ims_sip::has_header(response, "Expires"),
+        warning = crate::ims_sip::has_header(response, "Warning"),
+        sensitive_values = "redacted",
+        "IMS REGISTER response metadata"
+    );
+}
+
+pub async fn secondary_ims_bearer_connected(
+    qmi_device: &str,
+    session: &QmiPacketSession,
+) -> Result<bool> {
+    let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(15),
         Command::new("qmicli")
@@ -405,6 +650,9 @@ pub async fn secondary_ims_bearer_connected(qmi_device: &str) -> Result<bool> {
                 qmi_device,
                 "--device-open-proxy",
                 "--device-open-qmi",
+                "--device-open-net=net-raw-ip|net-no-qos-header",
+                &cid_arg,
+                "--client-no-release-cid",
                 "--wds-get-packet-service-status",
             ])
             .output(),
@@ -423,12 +671,16 @@ pub async fn secondary_ims_bearer_connected(qmi_device: &str) -> Result<bool> {
         .ok_or_else(|| anyhow!("secondary IMS bearer status was not recognized"))
 }
 
-pub async fn stop_secondary_ims_bearer(qmi_device: &str, packet_handle: &str) -> Result<()> {
-    if qmi_device.trim().is_empty() || packet_handle.trim().is_empty() {
+pub async fn stop_secondary_ims_bearer(
+    qmi_device: &str,
+    session: &QmiPacketSession,
+) -> Result<()> {
+    if qmi_device.trim().is_empty() || session.packet_handle.trim().is_empty() {
         return Err(anyhow!("QMI device and packet handle are required"));
     }
 
-    let stop_arg = format!("--wds-stop-network={packet_handle}");
+    let stop_arg = format!("--wds-stop-network={}", session.packet_handle);
+    let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(30),
         Command::new("qmicli")
@@ -439,6 +691,7 @@ pub async fn stop_secondary_ims_bearer(qmi_device: &str, packet_handle: &str) ->
                 "--device-open-proxy",
                 "--device-open-qmi",
                 "--device-open-net=net-raw-ip|net-no-qos-header",
+                &cid_arg,
                 &stop_arg,
             ])
             .output(),
@@ -462,14 +715,22 @@ pub async fn run_secondary_ims_bearer_supervisor(
     database: Arc<Database>,
     notifications: Arc<NotificationSender>,
 ) {
-    let mut active: Option<(String, String)> = None;
+    let mut active: Option<(String, QmiPacketSession)> = None;
     let mut sms_listener: Option<JoinHandle<()>> = None;
+    let mut active_xfrm: Option<crate::ims_ipsec::XfrmPlan> = None;
+    let mut active_network: Option<ConfiguredImsNetwork> = None;
 
     loop {
         let volte = config.get_config().volte;
         if !volte.feature_enabled {
             if let Some(listener) = sms_listener.take() {
                 listener.abort();
+            }
+            if let Some(plan) = active_xfrm.take() {
+                crate::ims_ipsec::uninstall_plan(&plan).await;
+            }
+            if let Some(network) = active_network.take() {
+                cleanup_secondary_ipv6_interface(&network).await;
             }
             if let Some((device, handle)) = active.take() {
                 let _ = stop_secondary_ims_bearer(&device, &handle).await;
@@ -512,70 +773,13 @@ pub async fn run_secondary_ims_bearer_supervisor(
             });
             match start_secondary_ims_bearer(&device, "ims").await {
                 Ok((handle, settings)) => {
-                    active = Some((device.clone(), handle.clone()));
-                    let mut pcscf_address = None;
+                    active = Some((device.clone(), handle));
+                    let mut pcscf_candidates = Vec::new();
                     let _ = write_runtime_status(&RuntimeStatus {
-                        phase: "usim_aid_selecting".to_string(),
+                        phase: "pcscf_discovering".to_string(),
                         transport: "native_qmi".to_string(),
                         ..RuntimeStatus::default()
                     });
-                    match crate::modem_manager::find_modem_path(&conn).await {
-                        Ok(modem_path) => {
-                            let command = match crate::ims_uim::build_csim_command(
-                                "00A4040007A0000000871002",
-                            ) {
-                                Ok(command) => command,
-                                Err(error) => {
-                                    let _ = write_runtime_status(&RuntimeStatus {
-                                        phase: "usim_aid_failed".to_string(),
-                                        transport: "native_qmi".to_string(),
-                                        last_error: error.to_string(),
-                                        ..RuntimeStatus::default()
-                                    });
-                                    continue;
-                                }
-                            };
-                            match crate::modem_manager::send_at_command(
-                                &conn,
-                                &modem_path,
-                                &command,
-                            )
-                            .await
-                            {
-                                Ok(response) => match crate::ims_uim::extract_csim_hex(&response)
-                                    .and_then(|hex| {
-                                        crate::ims_uim::parse_aid_from_select_response(&hex)
-                                            .map(|_| ())
-                                    }) {
-                                    Ok(()) => {}
-                                    Err(error) => {
-                                        let _ = write_runtime_status(&RuntimeStatus {
-                                            phase: "usim_aid_failed".to_string(),
-                                            transport: "native_qmi".to_string(),
-                                            last_error: error.to_string(),
-                                            ..RuntimeStatus::default()
-                                        });
-                                    }
-                                },
-                                Err(error) => {
-                                    let _ = write_runtime_status(&RuntimeStatus {
-                                        phase: "usim_aid_failed".to_string(),
-                                        transport: "native_qmi".to_string(),
-                                        last_error: error,
-                                        ..RuntimeStatus::default()
-                                    });
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            let _ = write_runtime_status(&RuntimeStatus {
-                                phase: "usim_aid_failed".to_string(),
-                                transport: "native_qmi".to_string(),
-                                last_error: error.to_string(),
-                                ..RuntimeStatus::default()
-                            });
-                        }
-                    }
                     if let Ok(modem_path) = crate::modem_manager::find_modem_path(&conn).await {
                         match crate::modem_manager::send_at_command(
                             &conn,
@@ -585,10 +789,12 @@ pub async fn run_secondary_ims_bearer_supervisor(
                         .await
                         {
                             Ok(response) => {
-                                if let Some(pcscf) = crate::ims_sip::parse_pcscf_from_cgcontrdp(&response)
-                                {
-                                    tracing::info!(pcscf = %pcscf, "IMS P-CSCF discovered");
-                                    pcscf_address = Some(pcscf);
+                                pcscf_candidates = crate::ims_sip::parse_pcscf_candidates_from_cgcontrdp(
+                                    &response,
+                                    "ims",
+                                );
+                                if !pcscf_candidates.is_empty() {
+                                    tracing::info!(count = pcscf_candidates.len(), "IMS P-CSCF candidates discovered");
                                     let _ = write_runtime_status(&RuntimeStatus {
                                         phase: "pcscf_discovered".to_string(),
                                         transport: "native_qmi".to_string(),
@@ -600,7 +806,7 @@ pub async fn run_secondary_ims_bearer_supervisor(
                         }
                     }
                     let mut registration_succeeded = false;
-                    if let Some(pcscf) = pcscf_address {
+                    for pcscf in pcscf_candidates {
                         let _ = write_runtime_status(&RuntimeStatus {
                             phase: "ims_registering".to_string(),
                             transport: "native_qmi_ipsec".to_string(),
@@ -622,27 +828,42 @@ pub async fn run_secondary_ims_bearer_supervisor(
                                 ..RuntimeStatus::default()
                             });
                         } else {
-                            match register_native_ims(&conn, &settings, pcscf).await {
-                            Ok(()) => {
-                                registration_succeeded = true;
-                                if volte.sms_enabled {
-                                    let sms_local = settings.ipv6_address.parse().ok();
-                                    if let Some(sms_local) = sms_local {
-                                        let database_clone = Arc::clone(&database);
-                                        let notifications_clone = Arc::clone(&notifications);
-                                        sms_listener = Some(tokio::spawn(async move {
-                                            if let Err(error) = crate::ims_sms::run_ims_sms_listener(
-                                                sms_local,
-                                                5062,
-                                                database_clone,
-                                                notifications_clone,
-                                            )
-                                            .await
-                                            {
-                                                tracing::warn!(error = %error, "IMS SMS listener stopped");
-                                            }
-                                        }));
+                            match active_network.as_mut() {
+                                Some(network) => {
+                                    if !network.pcscf_routes.contains(&pcscf) {
+                                        network.pcscf_routes.push(pcscf);
                                     }
+                                }
+                                None => {
+                                    active_network = Some(ConfiguredImsNetwork {
+                                        netdev: netdev.clone(),
+                                        settings: settings.clone(),
+                                        pcscf_routes: vec![pcscf],
+                                    });
+                                }
+                            }
+                            match register_native_ims(&conn, &settings, pcscf, &netdev).await {
+                            Ok(session) => {
+                                registration_succeeded = true;
+                                active_xfrm = Some(session.xfrm_plan);
+                                if volte.sms_enabled {
+                                    let database_clone = Arc::clone(&database);
+                                    let notifications_clone = Arc::clone(&notifications);
+                                    sms_listener = Some(tokio::spawn(async move {
+                                        if let Err(error) = crate::ims_sms::run_ims_sms_listener(
+                                            session.channel,
+                                            session.sip,
+                                            session.security_header,
+                                            session.service_routes,
+                                            session.refresh_after,
+                                            database_clone,
+                                            notifications_clone,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(error = %error, "IMS SMS listener stopped");
+                                        }
+                                    }));
                                 }
                                 let _ = write_runtime_status(&RuntimeStatus {
                                     phase: "registered".to_string(),
@@ -652,8 +873,10 @@ pub async fn run_secondary_ims_bearer_supervisor(
                                     interface: netdev.clone(),
                                     ..RuntimeStatus::default()
                                 });
+                                break;
                             }
                             Err(error) => {
+                                tracing::warn!(pcscf = %pcscf, error = %error, "IMS registration attempt failed");
                                 let _ = write_runtime_status(&RuntimeStatus {
                                     phase: "register_failed".to_string(),
                                     transport: "native_qmi_ipsec".to_string(),
@@ -668,15 +891,23 @@ pub async fn run_secondary_ims_bearer_supervisor(
                         if let Some(listener) = sms_listener.take() {
                             listener.abort();
                         }
+                        if let Some(plan) = active_xfrm.take() {
+                            crate::ims_ipsec::uninstall_plan(&plan).await;
+                        }
+                        if let Some(network) = active_network.take() {
+                            cleanup_secondary_ipv6_interface(&network).await;
+                        }
                         if let Some((active_device, active_handle)) = active.take() {
                             let _ = stop_secondary_ims_bearer(&active_device, &active_handle).await;
                         }
                         let _ = write_runtime_status(&RuntimeStatus {
-                            phase: "bearer_connected".to_string(),
+                            phase: "register_failed".to_string(),
                             transport: "native_qmi".to_string(),
                             interface: netdev.clone(),
+                            last_error: "all IMS P-CSCF registration attempts failed".to_string(),
                             ..RuntimeStatus::default()
                         });
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                 }
                 Err(error) => {
@@ -692,14 +923,47 @@ pub async fn run_secondary_ims_bearer_supervisor(
             continue;
         }
 
+        if sms_listener.as_ref().is_some_and(|listener| listener.is_finished()) {
+            if let Some(listener) = sms_listener.take() {
+                let _ = listener.await;
+            }
+            if let Some(plan) = active_xfrm.take() {
+                crate::ims_ipsec::uninstall_plan(&plan).await;
+            }
+            if let Some(network) = active_network.take() {
+                cleanup_secondary_ipv6_interface(&network).await;
+            }
+            if let Some((device, handle)) = active.take() {
+                let _ = stop_secondary_ims_bearer(&device, &handle).await;
+            }
+            let _ = write_runtime_status(&RuntimeStatus {
+                phase: "ims_session_lost".to_string(),
+                transport: "native_qmi_ipsec".to_string(),
+                last_error: "IMS SIP session stopped; reconnecting".to_string(),
+                ..RuntimeStatus::default()
+            });
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
         let (device, handle) = active.as_ref().expect("active bearer exists");
-        match secondary_ims_bearer_connected(device).await {
+        match secondary_ims_bearer_connected(device, handle).await {
             Ok(true) => {
                 tokio::time::sleep(Duration::from_secs(10)).await;
             }
-            Ok(false) | Err(_) => {
+            Err(error) => {
+                tracing::warn!(error = %error, "secondary IMS bearer status was inconclusive; retaining registered session");
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            Ok(false) => {
                 if let Some(listener) = sms_listener.take() {
                     listener.abort();
+                }
+                if let Some(plan) = active_xfrm.take() {
+                    crate::ims_ipsec::uninstall_plan(&plan).await;
+                }
+                if let Some(network) = active_network.take() {
+                    cleanup_secondary_ipv6_interface(&network).await;
                 }
                 let _ = stop_secondary_ims_bearer(device, handle).await;
                 active = None;
@@ -733,6 +997,7 @@ mod tests {
             Some(super::QmiBearerSettings {
                 ipv6_address: "2001:db8::10".to_string(),
                 ipv6_gateway: "2001:db8::1".to_string(),
+                ipv6_prefix: 64,
                 mtu: Some(1432),
             })
         );
@@ -745,6 +1010,13 @@ mod tests {
         let settings = super::parse_qmi_bearer_settings(output).unwrap();
         assert_eq!(settings.ipv6_address, "2001:db8::10");
         assert_eq!(settings.ipv6_gateway, "2001:db8::1");
+        assert_eq!(settings.ipv6_prefix, 64);
+    }
+
+    #[test]
+    fn parses_separate_qmi_ipv6_prefix() {
+        let output = "IPv6 address: 2001:db8::10\nIPv6 subnet prefix: 56\nIPv6 gateway address: 2001:db8::1";
+        assert_eq!(super::parse_qmi_bearer_settings(output).unwrap().ipv6_prefix, 56);
     }
 
     #[test]
@@ -752,6 +1024,10 @@ mod tests {
         assert_eq!(
             super::parse_qmi_packet_handle("Packet data handle: '42'"),
             Some("42".to_string())
+        );
+        assert_eq!(
+            super::parse_qmi_client_id("Service: 'wds'\nCID: '17'"),
+            Some("17".to_string())
         );
     }
 

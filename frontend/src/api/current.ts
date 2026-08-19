@@ -81,6 +81,7 @@ import type {
   WlanProfilesResponse,
   WlanScanResponse,
   WlanStatusResponse,
+  VolteControlResponse,
 } from './types'
 
 type SmsListResponse = {
@@ -540,6 +541,17 @@ class SimAdminCurrentAPI {
     return request<ApiResponse<AirplaneModeResponse>>('/airplane-mode', {
       method: 'POST',
       body: JSON.stringify(body),
+    })
+  }
+
+  async getVolteControl() {
+    return request<ApiResponse<VolteControlResponse>>('/volte/control')
+  }
+
+  async setVolteFeature(enabled: boolean) {
+    return request<ApiResponse<VolteControlResponse>>('/volte/feature', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
     })
   }
 

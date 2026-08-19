@@ -34,6 +34,8 @@ mod device_network;
 mod device_status;
 mod esim;
 mod handlers;
+mod ims_channel;
+mod ims_identity;
 mod ims_ipsec;
 mod ims_sip;
 mod ims_sms;

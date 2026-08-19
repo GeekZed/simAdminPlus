@@ -423,7 +423,7 @@ export default function Sidebar({
       >
         <Box
           component="a"
-          href="https://github.com/3899/SimAdmin"
+          href="https://github.com/GeekZed/simAdminPlus"
           target="_blank"
           rel="noopener noreferrer"
           sx={{
@@ -449,7 +449,7 @@ export default function Sidebar({
               transition: `opacity ${SIDEBAR_TRANSITION}, max-width ${SIDEBAR_TRANSITION}`,
             }}
           >
-            3899/SimAdmin
+            GeekZed/simAdminPlus
           </Typography>
         </Box>
         <Box
