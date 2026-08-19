@@ -113,7 +113,10 @@ jobs:
               sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$source"
             fi
           done
-          APT_OPTIONS=(-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/apt-mirrors.txt
+          fi
+          APT_OPTIONS=(-o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10)
           sudo apt-get "${APT_OPTIONS[@]}" update
           sudo apt-get "${APT_OPTIONS[@]}" install -y musl-tools
           if [ "${{ inputs.use_upx }}" = "true" ]; then
