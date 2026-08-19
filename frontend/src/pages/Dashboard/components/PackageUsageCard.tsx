@@ -1,4 +1,4 @@
-import { Card, CardContent, Box, Typography, Stack, Chip, Button, Dialog, DialogTitle, DialogContent, DialogActions, TextField } from '@mui/material'
+import { Card, CardContent, Box, Typography, Stack, Chip, Button, Dialog, DialogTitle, DialogContent, DialogActions, TextField, LinearProgress } from '@mui/material'
 import { useState } from 'react'
 import { DataUsage } from '@mui/icons-material'
 import type { PackageUsageResponse } from '@/api/types'
@@ -9,11 +9,21 @@ function gb(bytes: number) {
 }
 
 function UsageRow({ title, remaining, used, total }: { title: string; remaining: number; used: number; total: number }) {
+  const percent = total > 0 ? Math.min(100, Math.max(0, (used / total) * 100)) : 0
   return (
     <Box>
-      <Typography variant="body2" fontWeight={700}>{title}</Typography>
+      <Box display="flex" justifyContent="space-between" alignItems="baseline" gap={1}>
+        <Typography variant="body2" fontWeight={700}>{title}</Typography>
+        <Typography variant="caption" color="success.main" fontWeight={700}>{percent.toFixed(0)}% 已用</Typography>
+      </Box>
+      <LinearProgress
+        variant="determinate"
+        value={percent}
+        color="success"
+        sx={{ mt: 0.75, height: 7, borderRadius: 4, bgcolor: 'success.50', '& .MuiLinearProgress-bar': { borderRadius: 4 } }}
+      />
       <Typography variant="caption" color="text.secondary">
-        本月剩余 {gb(remaining)} · 已用 {gb(used)} · 总量 {gb(total)}
+        剩余 {gb(remaining)} · 已用 {gb(used)} · 总量 {gb(total)}
       </Typography>
     </Box>
   )
