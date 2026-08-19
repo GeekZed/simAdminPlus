@@ -51,7 +51,7 @@ pub fn extract_csim_hex(response: &str) -> Result<String> {
 pub fn build_aka_auth_command(nonce: &str) -> Result<String> {
     let (rand, autn) = decode_aka_nonce(nonce)?;
     let apdu = format!(
-        "008800812210{}{}",
+        "008800812210{}10{}",
         encode_hex(&rand),
         encode_hex(&autn)
     );
@@ -100,7 +100,7 @@ pub async fn authenticate_via_qmi(nonce: &str) -> Result<Result<AkaResponse, Aka
         .ok_or_else(|| anyhow!("QMI UIM did not retain a client ID"))?;
 
     let mut apdu = format!(
-        "008800812210{}{}00",
+        "008800812210{}10{}00",
         encode_hex(&rand),
         encode_hex(&autn)
     );
@@ -323,16 +323,20 @@ mod tests {
     fn builds_aka_auth_apdu_from_base64_nonce() {
         let nonce = STANDARD.encode([0x11u8; 32]);
         let command = build_aka_auth_command(&nonce).unwrap();
-        assert!(command.contains("008800812210"));
-        assert!(command.ends_with("\""));
+        assert_eq!(
+            command,
+            format!("AT+CSIM=78,\"008800812210{}10{}\"", "11".repeat(16), "11".repeat(16))
+        );
     }
 
     #[test]
     fn ignores_aka_nonce_server_data_after_rand_and_autn() {
         let nonce = STANDARD.encode([0x11u8; 40]);
         let command = build_aka_auth_command(&nonce).unwrap();
-        assert!(!command.contains(&"11".repeat(40)));
-        assert!(command.contains(&"11".repeat(32)));
+        assert_eq!(
+            command,
+            build_aka_auth_command(&STANDARD.encode([0x11u8; 32])).unwrap()
+        );
     }
 
     #[test]
