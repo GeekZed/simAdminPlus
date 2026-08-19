@@ -96,6 +96,7 @@ jobs:
         run: |
           printf '%s\n' "$VERSION" > VERSION
           sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" backend/Cargo.toml
+          perl -0pi -e 's/(name = "simadmin"\nversion = ")[^"]+/$1$ENV{VERSION}/' backend/Cargo.lock
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" frontend/package.json
 
       - name: Install Rust toolchain
