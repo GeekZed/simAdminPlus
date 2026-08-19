@@ -80,7 +80,11 @@ pub async fn authenticate_via_qmi(nonce: &str) -> Result<Result<AkaResponse, Aka
         .ok()
         .and_then(|value| value.parse::<u8>().ok())
         .unwrap_or(1);
-    let open_arg = format!("--uim-open-logical-channel={slot},A0000000871002");
+    let card_status = run_qmicli(&device, &["--uim-get-card-status"]).await?;
+    let aid = parse_usim_aid_from_card_status(&card_status)
+        .map(|aid| encode_hex(&aid))
+        .unwrap_or_else(|| "A0000000871002".to_string());
+    let open_arg = format!("--uim-open-logical-channel={slot},{aid}");
     let open = run_qmicli(&device, &["--client-no-release-cid", &open_arg]).await?;
     let channel = open.lines().find_map(|line| {
         line.trim()
@@ -122,6 +126,33 @@ pub async fn authenticate_via_qmi(nonce: &str) -> Result<Result<AkaResponse, Aka
     let cid_arg = format!("--client-cid={client_id}");
     let _ = run_qmicli(&device, &[&cid_arg, &close_arg]).await;
     parse_aka_response(&response?)
+}
+
+pub fn parse_usim_aid_from_card_status(output: &str) -> Option<Vec<u8>> {
+    let mut in_usim = false;
+    let mut expects_aid = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Application type:") {
+            in_usim = trimmed.to_ascii_lowercase().contains("'usim");
+            expects_aid = false;
+            continue;
+        }
+        if in_usim && trimmed == "Application ID:" {
+            expects_aid = true;
+            continue;
+        }
+        if expects_aid {
+            let hex = trimmed.replace(':', "");
+            if let Ok(aid) = decode_hex(&hex) {
+                if aid.starts_with(&[0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02]) {
+                    return Some(aid);
+                }
+            }
+            expects_aid = false;
+        }
+    }
+    None
 }
 
 async fn send_qmi_apdu(
@@ -260,6 +291,15 @@ mod tests {
         assert_eq!(
             parse_aid_from_select_response("62098407A0000000871002").unwrap(),
             vec![0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02]
+        );
+    }
+
+    #[test]
+    fn parses_full_usim_aid_from_qmi_card_status() {
+        let status = "Application [1]:\n  Application type:  'csim (4)'\n  Application ID:\n    A0:00:00:03:43:10:02\nApplication [2]:\n  Application type:  'usim (2)'\n  Application state: 'ready'\n  Application ID:\n    A0:00:00:00:87:10:02:FF:86:FF:03:89:FF:FF:FF:FF\n";
+        assert_eq!(
+            encode_hex(&parse_usim_aid_from_card_status(status).unwrap()),
+            "A0000000871002FF86FF0389FFFFFFFF"
         );
     }
 
