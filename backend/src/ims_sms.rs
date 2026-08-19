@@ -369,7 +369,7 @@ pub fn build_rp_ack_message(
         header.push_str(&format!("Security-Verify: {security_verify}\r\n"));
     }
     header.push_str(&format!(
-        "Accept-Contact: *;+g.3gpp.smsip\r\nAccept: application/vnd.3gpp.sms\r\nUser-Agent: SimAdmin\r\nContent-Type: application/vnd.3gpp.sms\r\nContent-Length: {}\r\n\r\n",
+        "Accept-Contact: *;+g.3gpp.smsip\r\nAccept: application/vnd.3gpp.sms\r\nUser-Agent: SimAdmin VoLTE\r\nContent-Type: application/vnd.3gpp.sms\r\nContent-Length: {}\r\n\r\n",
         body.len()
     ));
     let mut packet = header.into_bytes();
@@ -467,7 +467,13 @@ pub async fn run_ims_sms_listener(
                 .and_then(crate::ims_sip::sip_status_code)
                 .unwrap_or_default();
             let matched = pending_rp_acks.contains_key(&(call_id.clone(), cseq));
-            tracing::info!(status, matched, "IMS RP-ACK SIP response received");
+            let reason = std::str::from_utf8(&packet)
+                .ok()
+                .and_then(|response| response.lines().next())
+                .and_then(|line| line.splitn(3, ' ').nth(2))
+                .unwrap_or("unknown");
+            let warning = headers.get("warning").map(String::as_str).unwrap_or("none");
+            tracing::info!(status, reason, warning, matched, "IMS RP-ACK SIP response received");
             if (200..300).contains(&status) {
                 pending_rp_acks.remove(&(call_id, cseq));
             } else if status >= 300 {
