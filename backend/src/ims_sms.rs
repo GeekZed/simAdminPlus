@@ -1,6 +1,7 @@
 //! Decoding of MT SMS carried in 3GPP IMS SIP MESSAGE bodies.
 
 use anyhow::{anyhow, Result};
+use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -317,19 +318,20 @@ fn header_uri(value: &str) -> Option<String> {
     Some(value.split(';').next()?.trim().to_string())
 }
 
-fn next_message_cseq(headers: &HashMap<String, String>) -> u32 {
-    headers
-        .get("cseq")
-        .and_then(|value| value.split_whitespace().next())
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(1)
-        .saturating_add(1)
+fn random_hex_token(byte_count: usize) -> Result<String> {
+    let mut bytes = vec![0u8; byte_count];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow!("IMS SMS transaction token generation failed"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 pub fn build_rp_ack_message(
     headers: &HashMap<String, String>,
     local: std::net::Ipv6Addr,
     local_port: u16,
+    pcscf: std::net::SocketAddr,
+    public_identity: &str,
     service_routes: &[String],
     security_verify: Option<&str>,
     body: &[u8],
@@ -340,28 +342,34 @@ pub fn build_rp_ack_message(
             .ok_or_else(|| anyhow!("IMS SMS From header is missing"))?,
     )
     .ok_or_else(|| anyhow!("IMS SMS From URI is missing"))?;
-    let from = headers
-        .get("to")
-        .ok_or_else(|| anyhow!("IMS SMS To header is missing"))?;
-    let to = headers
-        .get("from")
-        .ok_or_else(|| anyhow!("IMS SMS From header is missing"))?;
-    let call_id = headers
-        .get("call-id")
-        .ok_or_else(|| anyhow!("IMS SMS Call-ID header is missing"))?;
-    let cseq = next_message_cseq(headers);
-    let branch = format!("z9hG4bK-simadmin-rp-ack-{cseq}");
+    let branch = format!("z9hG4bK-simadmin-rp-ack-{}", random_hex_token(8)?);
+    let from_tag = random_hex_token(8)?;
+    let call_id = format!("{}@simadmin", random_hex_token(16)?);
     let mut header = format!(
-        "MESSAGE {target} SIP/2.0\r\nVia: SIP/2.0/UDP [{local}]:{local_port};branch={branch};rport\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {cseq} MESSAGE\r\n"
+        "MESSAGE {target} SIP/2.0\r\nVia: SIP/2.0/UDP [{local}]:{local_port};branch={branch};rport\r\nMax-Forwards: 70\r\nFrom: <{public_identity}>;tag={from_tag}\r\nTo: <{target}>\r\nCall-ID: {call_id}\r\nCSeq: 1 MESSAGE\r\n"
     );
-    for route in service_routes {
-        header.push_str(&format!("Route: {route}\r\n"));
+    if service_routes.is_empty() {
+        let route_host = match pcscf.ip() {
+            std::net::IpAddr::V4(address) => address.to_string(),
+            std::net::IpAddr::V6(address) => format!("[{address}]"),
+        };
+        header.push_str(&format!(
+            "Route: <sip:{route_host}:{};lr>\r\n",
+            pcscf.port()
+        ));
+    } else {
+        for route in service_routes {
+            header.push_str(&format!("Route: {route}\r\n"));
+        }
     }
+    header.push_str(&format!(
+        "P-Preferred-Identity: <{public_identity}>\r\nP-Access-Network-Info: 3GPP-E-UTRAN-FDD\r\nP-Preferred-Service: urn:urn-7:3gpp-service.ims.icsi.sms\r\n"
+    ));
     if let Some(security_verify) = security_verify {
         header.push_str(&format!("Security-Verify: {security_verify}\r\n"));
     }
     header.push_str(&format!(
-        "Content-Type: application/vnd.3gpp.sms\r\nContent-Length: {}\r\n\r\n",
+        "Accept-Contact: *;+g.3gpp.smsip\r\nAccept: application/vnd.3gpp.sms\r\nUser-Agent: SimAdmin\r\nContent-Type: application/vnd.3gpp.sms\r\nContent-Length: {}\r\n\r\n",
         body.len()
     ));
     let mut packet = header.into_bytes();
@@ -458,6 +466,8 @@ pub async fn run_ims_sms_listener(
                 .ok()
                 .and_then(crate::ims_sip::sip_status_code)
                 .unwrap_or_default();
+            let matched = pending_rp_acks.contains_key(&(call_id.clone(), cseq));
+            tracing::info!(status, matched, "IMS RP-ACK SIP response received");
             if (200..300).contains(&status) {
                 pending_rp_acks.remove(&(call_id, cseq));
             } else if status >= 300 {
@@ -496,14 +506,22 @@ pub async fn run_ims_sms_listener(
                     &headers,
                     local,
                     route.local.port(),
+                    route.remote,
+                    &registration.public_identity,
                     &service_routes,
                     channel.security_verify(),
                     &ack,
                 ) {
                     channel.send(&packet).await?;
-                    if let Some(call_id) = headers.get("call-id") {
+                    if let Ok((ack_headers, _)) = parse_sip_message(&packet) {
+                        let call_id = ack_headers.get("call-id").cloned().unwrap_or_default();
+                        let cseq = ack_headers
+                            .get("cseq")
+                            .and_then(|value| value.split_whitespace().next())
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or_default();
                         pending_rp_acks.insert(
-                            (call_id.clone(), next_message_cseq(&headers)),
+                            (call_id, cseq),
                             PendingRpAck {
                                 packet,
                                 deadline: tokio::time::Instant::now()
@@ -656,6 +674,8 @@ mod tests {
             &headers,
             "2001:db8::10".parse().unwrap(),
             5062,
+            "[2001:db8::2]:5060".parse().unwrap(),
+            "sip:me@example",
             &["<sip:[2001:db8::2]:5060;lr>".to_string()],
             Some("ipsec-3gpp;spi-c=1"),
             &[0x02, 0x37],
@@ -663,6 +683,9 @@ mod tests {
         .unwrap();
         let text = String::from_utf8_lossy(&packet);
         assert!(text.contains("MESSAGE sip:network@example SIP/2.0"));
+        assert!(text.contains("From: <sip:me@example>;tag="));
+        assert!(text.contains("To: <sip:network@example>\r\n"));
+        assert!(text.contains("CSeq: 1 MESSAGE\r\n"));
         assert!(text.contains("Route: <sip:[2001:db8::2]:5060;lr>\r\n"));
         assert!(text.contains("Security-Verify: ipsec-3gpp;spi-c=1\r\n"));
         assert!(packet.ends_with(&[0x02, 0x37]));
