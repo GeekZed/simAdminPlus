@@ -181,8 +181,16 @@ pub fn parse_aid_from_select_response(response_hex: &str) -> Result<Vec<u8>> {
 
 pub fn parse_aka_response(response_hex: &str) -> Result<Result<AkaResponse, AkaResync>> {
     let bytes = decode_hex(response_hex)?;
-    if bytes.len() < 2 || bytes[bytes.len() - 2..] != [0x90, 0x00] {
-        return Err(anyhow!("USIM AKA APDU failed"));
+    if bytes.len() < 2 {
+        return Err(anyhow!("USIM AKA APDU response is truncated"));
+    }
+    if bytes[bytes.len() - 2..] != [0x90, 0x00] {
+        return Err(anyhow!(
+            "USIM AKA APDU failed (SW={:02X}{:02X}, data_len={})",
+            bytes[bytes.len() - 2],
+            bytes[bytes.len() - 1],
+            bytes.len() - 2
+        ));
     }
     let payload = unwrap_authenticate_response(&bytes[..bytes.len() - 2])?;
     match payload.first().copied() {
@@ -319,5 +327,13 @@ mod tests {
     #[test]
     fn rejects_truncated_aka_material() {
         assert!(parse_aka_response("DB04AABB9000").is_err());
+    }
+
+    #[test]
+    fn reports_apdu_status_without_exposing_payload() {
+        assert_eq!(
+            parse_aka_response("DEADBEEF9862").unwrap_err().to_string(),
+            "USIM AKA APDU failed (SW=9862, data_len=4)"
+        );
     }
 }
