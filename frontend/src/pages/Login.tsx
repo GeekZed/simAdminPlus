@@ -15,10 +15,8 @@ import {
   useTheme,
 } from '@mui/material'
 import {
-  GitHub as GitHubIcon,
   KeyboardArrowRight as ArrowIcon,
   LockOutlined as LockIcon,
-  Star as StarIcon,
 } from '@mui/icons-material'
 import { api } from '../api/current'
 import type { SecurityConfig } from '../api/types'
@@ -475,26 +473,7 @@ export default function Login() {
 
               {error && <Alert severity="error" sx={{ width: '100%' }}>{error}</Alert>}
 
-              <Box sx={{ width: '100%', minHeight: 24, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <Link
-                  href="https://github.com/GeekZed/simAdminPlus"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  underline="none"
-                  color="text.secondary"
-                  sx={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 0.75,
-                    fontSize: 14,
-                    fontWeight: 600,
-                    '&:hover': { color: 'primary.main' },
-                  }}
-                >
-                  <GitHubIcon sx={{ fontSize: 18 }} />
-                  点亮 Star
-                  <StarIcon sx={{ fontSize: 18, color: '#facc15' }} />
-                </Link>
+              <Box sx={{ width: '100%', minHeight: 24 }}>
                 {mode === 'login' && (
                   <Box
                     sx={{
@@ -525,16 +504,7 @@ export default function Login() {
           color="text.secondary"
           sx={{ fontSize: 13 }}
         >
-          <Link
-            href="https://github.com/GeekZed/simAdminPlus"
-            target="_blank"
-            rel="noopener noreferrer"
-            underline="none"
-            color="inherit"
-            sx={{ '&:hover': { color: 'primary.main' } }}
-          >
-            Copyright © 2026 GeekZed · simAdminPlus
-          </Link>
+          <Typography component="span" color="inherit">Copyright © 2026 GeekZed · simAdminPlus</Typography>
           <Typography component="span" color="text.disabled">|</Typography>
           <CommunityTooltip />
           <Typography component="span" color="text.disabled">|</Typography>

@@ -25,14 +25,6 @@ import {
   DialogContentText,
   DialogActions,
   Divider,
-  FormControl,
-  FormControlLabel,
-  InputLabel,
-  Link,
-  MenuItem,
-  Select,
-  Switch,
-  TextField,
 } from '@mui/material'
 import Grid from '@mui/material/Grid'
 import {
@@ -45,55 +37,11 @@ import {
   SystemUpdateAlt,
   Cancel,
   RestartAlt,
-  Public,
-  Search,
-  Download,
-  NewReleases,
 } from '@mui/icons-material'
 import { api } from '../api/current'
-import type { OtaLatestReleaseResponse, OtaStatusResponse, OtaUploadResponse } from '../api/types'
+import type { OtaStatusResponse, OtaUploadResponse } from '../api/types'
 
-type ProxyPreset = 'https://gh-proxy.com/' | 'https://ghproxy.net/' | 'https://githubproxy.cc/' | 'custom'
-type OnlineUpdateState = 'idle' | 'checking' | 'available' | 'latest' | 'downloading'
-type MarkdownHeadingLevel = 1 | 2 | 3 | 4 | 5 | 6
-type MarkdownListItem = { text: string; indent: number }
-type MarkdownBlock =
-  | { type: 'heading'; level: MarkdownHeadingLevel; text: string }
-  | { type: 'paragraph'; text: string }
-  | { type: 'list'; ordered: boolean; items: MarkdownListItem[] }
-  | { type: 'code'; code: string; language?: string }
-  | { type: 'quote'; text: string }
-  | { type: 'rule' }
-
-const GITHUB_LATEST_RELEASE_PAGE = 'https://github.com/GeekZed/simAdminPlus/releases/latest'
 const BEIJING_TIME_ZONE = 'Asia/Shanghai'
-
-function normalizeVersion(version: string) {
-  return version.trim().replace(/^v/i, '')
-}
-
-function compareVersions(a: string, b: string) {
-  const aParts = normalizeVersion(a).split(/[.-]/)
-  const bParts = normalizeVersion(b).split(/[.-]/)
-  const length = Math.max(aParts.length, bParts.length)
-
-  for (let i = 0; i < length; i += 1) {
-    const aPart = aParts[i] ?? '0'
-    const bPart = bParts[i] ?? '0'
-    const aNum = Number(aPart)
-    const bNum = Number(bPart)
-
-    if (Number.isFinite(aNum) && Number.isFinite(bNum)) {
-      if (aNum !== bNum) return aNum - bNum
-      continue
-    }
-
-    const textCompare = aPart.localeCompare(bPart)
-    if (textCompare !== 0) return textCompare
-  }
-
-  return 0
-}
 
 function formatDateTime(value?: string) {
   if (!value) return 'N/A'
@@ -109,24 +57,6 @@ function formatDateTime(value?: string) {
     second: '2-digit',
     hour12: false,
   })} (北京时间)`
-}
-
-function formatBytes(size?: number) {
-  if (!size) return '未知'
-  const mb = size / 1024 / 1024
-  return `${mb.toFixed(1)} MB`
-}
-
-function getReleaseAsset(release: OtaLatestReleaseResponse) {
-  return release.assets?.find(asset => /\.(tar\.gz|tgz|zip)$/i.test(asset.name)) ?? release.assets?.[0]
-}
-
-function inferArch(assetName?: string) {
-  if (!assetName) return '未知'
-  if (/aarch64|arm64/i.test(assetName)) return 'aarch64-unknown-linux-musl'
-  if (/x86_64|amd64/i.test(assetName)) return 'x86_64-unknown-linux-musl'
-  if (/armv7|armhf/i.test(assetName)) return 'armv7-unknown-linux-musleabihf'
-  return '未知'
 }
 
 function InfoField({ label, value }: { label: string; value: ReactNode }) {
@@ -151,6 +81,7 @@ function InfoField({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
+/* GitHub Release markdown renderer removed with online OTA updates.
 function isMarkdownBlockStart(line: string) {
   const trimmed = line.trim()
   return (
@@ -455,6 +386,7 @@ function MarkdownPreview({ source }: { source?: string }) {
     </Box>
   )
 }
+*/
 
 export default function OtaUpdate() {
   const [loading, setLoading] = useState(true)
@@ -466,13 +398,6 @@ export default function OtaUpdate() {
   const [status, setStatus] = useState<OtaStatusResponse | null>(null)
   const [uploadResult, setUploadResult] = useState<OtaUploadResponse | null>(null)
   const [confirmDialog, setConfirmDialog] = useState<'apply' | 'cancel' | null>(null)
-
-  const [proxyEnabled, setProxyEnabled] = useState(true)
-  const [proxyPreset, setProxyPreset] = useState<ProxyPreset>('https://gh-proxy.com/')
-  const [customProxy, setCustomProxy] = useState('')
-  const [onlineState, setOnlineState] = useState<OnlineUpdateState>('idle')
-  const [latestRelease, setLatestRelease] = useState<OtaLatestReleaseResponse | null>(null)
-  const [downloadProgress, setDownloadProgress] = useState(0)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -492,91 +417,6 @@ export default function OtaUpdate() {
   useEffect(() => {
     void loadStatus()
   }, [loadStatus])
-
-  const getProxyPrefix = () => {
-    if (!proxyEnabled) return ''
-    if (proxyPreset !== 'custom') return proxyPreset
-    const trimmed = customProxy.trim()
-    if (!trimmed) return ''
-    return trimmed.endsWith('/') ? trimmed : `${trimmed}/`
-  }
-
-  const handleCheckOnlineUpdate = async () => {
-    setOnlineState('checking')
-    setError(null)
-    setSuccess(null)
-    setLatestRelease(null)
-    setDownloadProgress(0)
-
-    try {
-      const proxyPrefix = getProxyPrefix()
-      if (proxyEnabled && proxyPreset === 'custom' && !proxyPrefix) {
-        throw new Error('请输入自定义加速节点地址，或关闭 GitHub 下载加速')
-      }
-
-      const res = await api.getLatestOtaRelease({ proxy_prefix: proxyPrefix || undefined })
-      if (res.status !== 'ok' || !res.data) {
-        throw new Error(res.message || 'GitHub Releases 请求失败')
-      }
-
-      const release = res.data
-      setLatestRelease(release)
-      const currentVersion = status?.current_version || '0.0.0'
-      setOnlineState(compareVersions(release.tag_name, currentVersion) > 0 ? 'available' : 'latest')
-    } catch (err) {
-      setOnlineState('idle')
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  const handlePrepareOnlineUpdate = async () => {
-    if (!latestRelease) return
-
-    const proxyPrefix = getProxyPrefix()
-    if (proxyEnabled && proxyPreset === 'custom' && !proxyPrefix) {
-      setError('请输入自定义加速节点地址，或关闭 GitHub 下载加速')
-      return
-    }
-
-    setOnlineState('downloading')
-    setError(null)
-    setSuccess(null)
-    setDownloadProgress(0)
-
-    const timer = window.setInterval(() => {
-      setDownloadProgress(prev => Math.min(prev + 4 + Math.floor(Math.random() * 8), 88))
-    }, 260)
-
-    try {
-      const res = await api.prepareOnlineOta({ proxy_prefix: proxyPrefix || undefined })
-      window.clearInterval(timer)
-      setDownloadProgress(100)
-
-      const prepared = res.data
-      if (res.status === 'ok' && prepared) {
-        window.setTimeout(() => {
-          setUploadResult(prepared)
-          setOnlineState('idle')
-          setDownloadProgress(0)
-          if (prepared.validation.valid) {
-            setSuccess('在线下载成功，验证通过')
-          } else {
-            setError('在线 OTA 包验证失败：' + (prepared.validation.error || '未知错误'))
-          }
-          void loadStatus()
-        }, 300)
-      } else {
-        setOnlineState('available')
-        setDownloadProgress(0)
-        setError(res.message || '在线下载失败')
-      }
-    } catch (err) {
-      window.clearInterval(timer)
-      setOnlineState('available')
-      setDownloadProgress(0)
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -667,13 +507,8 @@ export default function OtaUpdate() {
     )
   }
 
-  const asset = latestRelease ? getReleaseAsset(latestRelease) : undefined
   const pendingMeta = status?.pending_meta
   const hasPendingUpdate = Boolean(pendingMeta)
-  const proxyPrefix = getProxyPrefix()
-  const downloadUrl = asset?.browser_download_url
-    ? `${proxyPrefix}${asset.browser_download_url}`
-    : undefined
 
   return (
     <Box>
@@ -683,7 +518,7 @@ export default function OtaUpdate() {
             OTA 更新
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            上传并安装系统更新包 / 在线获取最新版本
+            上传并安装系统更新包
           </Typography>
         </Box>
         <Button
@@ -941,6 +776,7 @@ export default function OtaUpdate() {
         ) : null}
 
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} alignItems="stretch">
+          {/* GitHub Release online update removed; OTA is kept as local upload only.
           <Card sx={{ flex: 1, minWidth: 0, display: 'flex' }}>
             <CardContent sx={{ flex: 1 }}>
               <Box display="flex" justifyContent="space-between" alignItems="center" gap={2} mb={2}>
@@ -1096,6 +932,7 @@ export default function OtaUpdate() {
             )}
             </CardContent>
           </Card>
+          */}
 
           <Card sx={{ flex: 1, minWidth: 0, display: 'flex' }}>
             <CardContent sx={{ flex: 1 }}>
@@ -1105,7 +942,7 @@ export default function OtaUpdate() {
               </Box>
 
               <Typography variant="body2" color="text.secondary" mb={2}>
-                前往 GitHub Releases 或 QQ 群下载安装包，手动上传即可完成升级或降级。
+                上传 OTA 更新包，验证通过后即可完成升级或降级。
               </Typography>
 
             <Alert severity="info" sx={{ mb: 2 }}>

@@ -19,7 +19,6 @@ import {
   Settings as SettingsIcon,
   Sms as SmsIcon,
   NotificationsActive as NotificationsIcon,
-  GitHub as GitHubIcon,
   SystemUpdateAlt as OtaIcon,
   Router as RouterIcon,
   SimCard as SimIcon,
@@ -421,45 +420,14 @@ export default function Sidebar({
           alignItems: compact ? 'center' : 'flex-start',
         }}
       >
-        <Box
-          component="a"
-          href="https://github.com/GeekZed/simAdminPlus"
-          target="_blank"
-          rel="noopener noreferrer"
-          sx={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: compact ? 0 : 0.5,
-            color: 'text.secondary',
-            fontSize: '0.75rem',
-            textDecoration: 'none',
-            width: 'fit-content',
-            '&:hover': { color: 'primary.main' },
-          }}
-        >
-          <GitHubIcon sx={{ fontSize: compact ? 22 : 16 }} />
-          <Typography
-            variant="caption"
-            color="inherit"
-            sx={{
-              opacity: compact ? 0 : 1,
-              maxWidth: compact ? 0 : 110,
-              overflow: 'hidden',
-              whiteSpace: 'nowrap',
-              transition: `opacity ${SIDEBAR_TRANSITION}, max-width ${SIDEBAR_TRANSITION}`,
-            }}
-          >
-            GeekZed/simAdminPlus
-          </Typography>
-        </Box>
-        <Box
-          sx={{
-            opacity: compact ? 0 : 1,
-            maxHeight: compact ? 0 : 48,
-            overflow: 'hidden',
-            transition: `opacity ${SIDEBAR_TRANSITION}, max-height ${SIDEBAR_TRANSITION}`,
-          }}
-        >
+      <Box
+        sx={{
+          opacity: compact ? 0 : 1,
+          maxHeight: compact ? 0 : 48,
+          overflow: 'hidden',
+          transition: `opacity ${SIDEBAR_TRANSITION}, max-height ${SIDEBAR_TRANSITION}`,
+        }}
+      >
           <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mt: 0.5 }}>
             v{__APP_VERSION__} ({__GIT_BRANCH__}/{__GIT_COMMIT__})
           </Typography>
