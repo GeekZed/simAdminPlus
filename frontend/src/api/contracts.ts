@@ -940,26 +940,6 @@ export interface OtaUploadResponse {
   validation: OtaValidation
 }
 
-export interface OtaOnlinePrepareRequest {
-  proxy_prefix?: string
-}
-
-export interface OtaReleaseAsset {
-  name: string
-  size: number
-  browser_download_url: string
-}
-
-export interface OtaLatestReleaseResponse {
-  tag_name: string
-  name?: string
-  published_at: string
-  target_commitish?: string
-  body?: string
-  html_url?: string
-  assets?: OtaReleaseAsset[]
-}
-
 export type DdnsProvider = 'cloudflare' | 'alidns' | 'tencentcloud'
 export type DdnsIpGetType = 'api' | 'interface'
 

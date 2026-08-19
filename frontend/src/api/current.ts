@@ -54,8 +54,6 @@ import type {
   NotificationQueueResponse,
   OperatorListResponse,
   OtaStatusResponse,
-  OtaLatestReleaseResponse,
-  OtaOnlinePrepareRequest,
   OtaUploadResponse,
   RadioMode,
   RadioModeResponse,
@@ -946,20 +944,6 @@ class SimAdminCurrentAPI {
     }
 
     return response.json() as Promise<ApiResponse<OtaUploadResponse>>
-  }
-
-  async prepareOnlineOta(config: OtaOnlinePrepareRequest) {
-    return request<ApiResponse<OtaUploadResponse>>('/ota/online-prepare', {
-      method: 'POST',
-      body: JSON.stringify(config),
-    })
-  }
-
-  async getLatestOtaRelease(config: OtaOnlinePrepareRequest) {
-    return request<ApiResponse<OtaLatestReleaseResponse>>('/ota/latest-release', {
-      method: 'POST',
-      body: JSON.stringify(config),
-    })
   }
 
   async applyOta(restartNow = false) {
