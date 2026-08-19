@@ -23,10 +23,15 @@ export function QuickControls({
   onToggleRoaming,
   onToggleVolte,
 }: QuickControlsProps) {
+  const volteTransport = volte?.runtime.transport.toLowerCase().includes('ipsec')
+    ? 'IPsec'
+    : volte?.runtime.transport.toLowerCase().includes('udp')
+      ? 'UDP'
+      : ''
   const volteLabel = !volte?.enabled
     ? '已关闭'
     : volte.runtime.registered
-      ? '已注册'
+      ? `已注册${volteTransport ? ` · ${volteTransport}` : ''}`
       : volte.runtime.phase === 'degraded'
         ? '异常'
         : '启动中'
