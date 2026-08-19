@@ -237,25 +237,28 @@ fn decode_sms_deliver(tpdu: &[u8]) -> Result<(String, String, Option<ConcatInfo>
 
 pub fn decode_ims_sms(body_hex: &str) -> Result<IncomingImsSms> {
     let rp_data = decode_hex(body_hex)?;
-    if rp_data.len() < 4 || rp_data[0] != 0x00 {
-        return Err(anyhow!("IMS body is not RP-DATA"));
+    if rp_data.len() < 4 || rp_data[0] != 0x01 {
+        return Err(anyhow!("IMS body is not network-to-MS RP-DATA"));
     }
     let mut index = 2;
     let originator_length = rp_data[index] as usize;
     index += 1 + originator_length;
-    let destination_length = *rp_data
-        .get(index)
-        .ok_or_else(|| anyhow!("IMS RP-DATA destination is missing"))? as usize;
-    index += 1 + destination_length;
-    let user_data_length = *rp_data
-        .get(index)
-        .ok_or_else(|| anyhow!("IMS RP-DATA user data is missing"))? as usize;
-    index += 1;
-    if rp_data.len() < index + user_data_length {
-        return Err(anyhow!("IMS RP-DATA user data is truncated"));
-    }
-    let (phone_number, content, concat) =
-        decode_sms_deliver(&rp_data[index..index + user_data_length])?;
+    let decode_at = |length_index: usize| -> Result<(String, String, Option<ConcatInfo>)> {
+        let user_data_length = *rp_data
+            .get(length_index)
+            .ok_or_else(|| anyhow!("IMS RP-DATA user data is missing"))? as usize;
+        let user_data_index = length_index + 1;
+        if user_data_length == 0 || rp_data.len() < user_data_index + user_data_length {
+            return Err(anyhow!("IMS RP-DATA user data is truncated"));
+        }
+        decode_sms_deliver(&rp_data[user_data_index..user_data_index + user_data_length])
+    };
+    let (phone_number, content, concat) = decode_at(index).or_else(|_| {
+        let destination_length = *rp_data
+            .get(index)
+            .ok_or_else(|| anyhow!("IMS RP-DATA destination is missing"))? as usize;
+        decode_at(index + 1 + destination_length)
+    })?;
     let marker = format!("volte-mt:{:x}", md5::compute(body_hex.as_bytes()));
     Ok(IncomingImsSms {
         phone_number,
@@ -287,8 +290,8 @@ pub fn build_rp_ack(body: &[u8]) -> Result<Vec<u8>> {
         body.iter().map(|byte| format!("{byte:02X}")).collect()
     };
     let rp_data = decode_hex(&body_hex)?;
-    if rp_data.len() < 2 || rp_data[0] != 0x00 {
-        return Err(anyhow!("cannot acknowledge non-RP-DATA body"));
+    if rp_data.len() < 2 || rp_data[0] != 0x01 {
+        return Err(anyhow!("cannot acknowledge non-MT RP-DATA body"));
     }
     Ok(vec![0x02, rp_data[1]])
 }
@@ -478,7 +481,15 @@ pub async fn run_ims_sms_listener(
         }
         let response = sip_ok_response(&headers);
         let _ = channel.send(response.as_bytes()).await;
-        if let Ok(ack) = build_rp_ack(&body) {
+        let ack = build_rp_ack(&body);
+        if let Err(error) = &ack {
+            tracing::warn!(
+                error = %error,
+                body_bytes = body.len(),
+                "IMS MT SMS RP-ACK body could not be built"
+            );
+        }
+        if let Ok(ack) = ack {
             let route = channel.route();
             if let std::net::IpAddr::V6(local) = route.local.ip() {
                 if let Ok(packet) = build_rp_ack_message(
@@ -504,8 +515,16 @@ pub async fn run_ims_sms_listener(
                 }
             }
         }
-        let Ok(mut incoming) = decode_ims_sms_body(&body) else {
-            continue;
+        let mut incoming = match decode_ims_sms_body(&body) {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    body_bytes = body.len(),
+                    "IMS MT SMS body could not be decoded"
+                );
+                continue;
+            }
         };
         if let Some(concat) = incoming.concat.clone() {
             if concat.total == 0 || concat.sequence == 0 || concat.sequence > concat.total {
@@ -572,7 +591,7 @@ mod tests {
     #[test]
     fn decodes_ucs2_sms_deliver() {
         let tpdu = "040B912143658709F1000832122310123400044F60597D";
-        let rp = format!("00000000{:02X}{}", tpdu.len() / 2, tpdu);
+        let rp = format!("010000{:02X}{}", tpdu.len() / 2, tpdu);
         let sms = decode_ims_sms(&rp).unwrap();
         assert_eq!(sms.phone_number, "+12345678901");
         assert_eq!(sms.content, "你好");
@@ -582,7 +601,7 @@ mod tests {
     #[test]
     fn decodes_ucs2_concat_header() {
         let tpdu = "440B912143658709F10008321223101234000A0500030102014F60597D";
-        let rp = format!("00000000{:02X}{}", tpdu.len() / 2, tpdu);
+        let rp = format!("010000{:02X}{}", tpdu.len() / 2, tpdu);
         let sms = decode_ims_sms(&rp).unwrap();
         assert_eq!(sms.content, "你好");
         assert_eq!(
@@ -617,13 +636,13 @@ mod tests {
 
     #[test]
     fn accepts_binary_sms_body() {
-        let body = [0x00, 0x00, 0x00, 0x00, 0x01, 0x04];
+        let body = [0x01, 0x00, 0x00, 0x01, 0x04];
         assert!(decode_ims_sms_body(&body).is_err());
     }
 
     #[test]
     fn builds_matching_rp_ack() {
-        assert_eq!(build_rp_ack(&[0x00, 0x37, 0x00, 0x00]).unwrap(), vec![0x02, 0x37]);
+        assert_eq!(build_rp_ack(&[0x01, 0x37, 0x00, 0x00]).unwrap(), vec![0x02, 0x37]);
     }
 
     #[test]
