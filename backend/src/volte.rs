@@ -214,6 +214,24 @@ pub fn parse_qmi_packet_handle(output: &str) -> Option<String> {
     })
 }
 
+pub fn parse_qmi_client_id(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        if label.trim() == "CID" {
+            let value = value.trim().trim_matches('\'');
+            (!value.is_empty()).then(|| value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+#[derive(Debug)]
+pub struct QmiPacketSession {
+    packet_handle: String,
+    client_id: String,
+}
+
 pub fn secondary_netdev(qmi_device: &str) -> String {
     if let Ok(value) = std::env::var("SIMADMIN_SECONDARY_QMI_NETDEV") {
         if !value.trim().is_empty() {
@@ -244,7 +262,7 @@ pub fn parse_qmi_connection_status(output: &str) -> Option<bool> {
 pub async fn start_secondary_ims_bearer(
     qmi_device: &str,
     apn: &str,
-) -> Result<(String, QmiBearerSettings)> {
+) -> Result<(QmiPacketSession, QmiBearerSettings)> {
     if qmi_device.trim().is_empty() || apn.trim().is_empty() {
         return Err(anyhow!("QMI device and IMS APN are required"));
     }
@@ -300,19 +318,29 @@ pub async fn start_secondary_ims_bearer(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let handle = parse_qmi_packet_handle(&stdout)
         .ok_or_else(|| anyhow!("qmicli did not return a packet data handle"))?;
+    let client_id = parse_qmi_client_id(&stdout)
+        .ok_or_else(|| anyhow!("qmicli did not return the retained WDS client ID"))?;
+    let session = QmiPacketSession {
+        packet_handle: handle,
+        client_id,
+    };
     let mut last_error = None;
     for _ in 0..5 {
-        match read_secondary_bearer_settings(qmi_device).await {
-            Ok(settings) => return Ok((handle, settings)),
+        match read_secondary_bearer_settings(qmi_device, &session).await {
+            Ok(settings) => return Ok((session, settings)),
             Err(error) => last_error = Some(error),
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    let _ = stop_secondary_ims_bearer(qmi_device, &handle).await;
+    let _ = stop_secondary_ims_bearer(qmi_device, &session).await;
     Err(last_error.unwrap_or_else(|| anyhow!("secondary IMS bearer settings unavailable")))
 }
 
-pub async fn read_secondary_bearer_settings(qmi_device: &str) -> Result<QmiBearerSettings> {
+pub async fn read_secondary_bearer_settings(
+    qmi_device: &str,
+    session: &QmiPacketSession,
+) -> Result<QmiBearerSettings> {
+    let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(15),
         Command::new("qmicli")
@@ -323,6 +351,8 @@ pub async fn read_secondary_bearer_settings(qmi_device: &str) -> Result<QmiBeare
                 "--device-open-proxy",
                 "--device-open-qmi",
                 "--device-open-net=net-raw-ip|net-no-qos-header",
+                &cid_arg,
+                "--client-no-release-cid",
                 "--wds-get-current-settings",
             ])
             .output(),
@@ -557,7 +587,11 @@ async fn register_native_ims(
     })
 }
 
-pub async fn secondary_ims_bearer_connected(qmi_device: &str) -> Result<bool> {
+pub async fn secondary_ims_bearer_connected(
+    qmi_device: &str,
+    session: &QmiPacketSession,
+) -> Result<bool> {
+    let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(15),
         Command::new("qmicli")
@@ -567,6 +601,9 @@ pub async fn secondary_ims_bearer_connected(qmi_device: &str) -> Result<bool> {
                 qmi_device,
                 "--device-open-proxy",
                 "--device-open-qmi",
+                "--device-open-net=net-raw-ip|net-no-qos-header",
+                &cid_arg,
+                "--client-no-release-cid",
                 "--wds-get-packet-service-status",
             ])
             .output(),
@@ -585,12 +622,16 @@ pub async fn secondary_ims_bearer_connected(qmi_device: &str) -> Result<bool> {
         .ok_or_else(|| anyhow!("secondary IMS bearer status was not recognized"))
 }
 
-pub async fn stop_secondary_ims_bearer(qmi_device: &str, packet_handle: &str) -> Result<()> {
-    if qmi_device.trim().is_empty() || packet_handle.trim().is_empty() {
+pub async fn stop_secondary_ims_bearer(
+    qmi_device: &str,
+    session: &QmiPacketSession,
+) -> Result<()> {
+    if qmi_device.trim().is_empty() || session.packet_handle.trim().is_empty() {
         return Err(anyhow!("QMI device and packet handle are required"));
     }
 
-    let stop_arg = format!("--wds-stop-network={packet_handle}");
+    let stop_arg = format!("--wds-stop-network={}", session.packet_handle);
+    let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(30),
         Command::new("qmicli")
@@ -601,6 +642,7 @@ pub async fn stop_secondary_ims_bearer(qmi_device: &str, packet_handle: &str) ->
                 "--device-open-proxy",
                 "--device-open-qmi",
                 "--device-open-net=net-raw-ip|net-no-qos-header",
+                &cid_arg,
                 &stop_arg,
             ])
             .output(),
@@ -624,7 +666,7 @@ pub async fn run_secondary_ims_bearer_supervisor(
     database: Arc<Database>,
     notifications: Arc<NotificationSender>,
 ) {
-    let mut active: Option<(String, String)> = None;
+    let mut active: Option<(String, QmiPacketSession)> = None;
     let mut sms_listener: Option<JoinHandle<()>> = None;
     let mut active_xfrm: Option<crate::ims_ipsec::XfrmPlan> = None;
     let mut active_network: Option<ConfiguredImsNetwork> = None;
@@ -682,7 +724,7 @@ pub async fn run_secondary_ims_bearer_supervisor(
             });
             match start_secondary_ims_bearer(&device, "ims").await {
                 Ok((handle, settings)) => {
-                    active = Some((device.clone(), handle.clone()));
+                    active = Some((device.clone(), handle));
                     let mut pcscf_candidates = Vec::new();
                     let _ = write_runtime_status(&RuntimeStatus {
                         phase: "usim_aid_selecting".to_string(),
@@ -910,7 +952,7 @@ pub async fn run_secondary_ims_bearer_supervisor(
         }
 
         let (device, handle) = active.as_ref().expect("active bearer exists");
-        match secondary_ims_bearer_connected(device).await {
+        match secondary_ims_bearer_connected(device, handle).await {
             Ok(true) => {
                 tokio::time::sleep(Duration::from_secs(10)).await;
             }
@@ -983,6 +1025,10 @@ mod tests {
         assert_eq!(
             super::parse_qmi_packet_handle("Packet data handle: '42'"),
             Some("42".to_string())
+        );
+        assert_eq!(
+            super::parse_qmi_client_id("Service: 'wds'\nCID: '17'"),
+            Some("17".to_string())
         );
     }
 
