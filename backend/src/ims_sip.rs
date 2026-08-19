@@ -1,6 +1,7 @@
 //! Minimal 3GPP IMS SIP REGISTER primitives.
 
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::net::Ipv6Addr;
 use tokio::net::UdpSocket;
 use tokio::time::{timeout, Duration};
@@ -11,7 +12,13 @@ pub struct SipRegistration {
     pub public_identity: String,
     pub realm: String,
     pub nonce: String,
-    pub aka_res_hex: String,
+    pub aka_res: Vec<u8>,
+    pub digest_algorithm: String,
+    pub digest_qop: Option<String>,
+    pub digest_opaque: Option<String>,
+    pub digest_proxy: bool,
+    pub cnonce: String,
+    pub nonce_count: u32,
     pub call_id: String,
     pub cseq: u32,
     pub contact_host: Ipv6Addr,
@@ -49,8 +56,8 @@ pub fn parse_pcscf_from_cgcontrdp(output: &str) -> Option<Ipv6Addr> {
     })
 }
 
-fn md5_hex(value: &str) -> String {
-    let digest = md5::compute(value.as_bytes());
+fn md5_hex(value: &[u8]) -> String {
+    let digest = md5::compute(value);
     format!("{digest:x}")
 }
 
@@ -60,14 +67,47 @@ pub fn aka_md5_response(
     nonce: &str,
     method: &str,
     uri: &str,
-    aka_res_hex: &str,
+    aka_res: &[u8],
 ) -> Result<String> {
-    if username.is_empty() || realm.is_empty() || nonce.is_empty() || aka_res_hex.is_empty() {
+    aka_md5_response_with_qop(
+        username, realm, nonce, method, uri, aka_res, None, "", "",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn aka_md5_response_with_qop(
+    username: &str,
+    realm: &str,
+    nonce: &str,
+    method: &str,
+    uri: &str,
+    aka_res: &[u8],
+    qop: Option<&str>,
+    cnonce: &str,
+    nonce_count: &str,
+) -> Result<String> {
+    if username.is_empty() || realm.is_empty() || nonce.is_empty() || aka_res.is_empty() {
         return Err(anyhow!("IMS AKA digest fields must not be empty"));
     }
-    let ha1 = md5_hex(&format!("{username}:{realm}:{aka_res_hex}"));
-    let ha2 = md5_hex(&format!("{method}:{uri}"));
-    Ok(md5_hex(&format!("{ha1}:{nonce}:{ha2}")))
+    let mut a1 = Vec::with_capacity(username.len() + realm.len() + aka_res.len() + 2);
+    a1.extend_from_slice(username.as_bytes());
+    a1.push(b':');
+    a1.extend_from_slice(realm.as_bytes());
+    a1.push(b':');
+    a1.extend_from_slice(aka_res);
+    let ha1 = md5_hex(&a1);
+    let ha2 = md5_hex(format!("{method}:{uri}").as_bytes());
+    let proof = match qop {
+        Some(qop) if qop.eq_ignore_ascii_case("auth") => {
+            if cnonce.is_empty() || nonce_count.is_empty() {
+                return Err(anyhow!("IMS AKA qop requires cnonce and nonce count"));
+            }
+            format!("{ha1}:{nonce}:{nonce_count}:{cnonce}:auth:{ha2}")
+        }
+        Some(_) => return Err(anyhow!("IMS AKA digest qop is unsupported")),
+        None => format!("{ha1}:{nonce}:{ha2}"),
+    };
+    Ok(md5_hex(proof.as_bytes()))
 }
 
 pub fn build_register(registration: &SipRegistration, branch: &str) -> Result<String> {
@@ -75,19 +115,54 @@ pub fn build_register(registration: &SipRegistration, branch: &str) -> Result<St
         return Err(anyhow!("SIP branch and Call-ID are required"));
     }
     let uri = format!("sip:{}", registration.realm);
-    let response = aka_md5_response(
+    if !registration.digest_algorithm.eq_ignore_ascii_case("AKAv1-MD5")
+        && !registration.digest_algorithm.eq_ignore_ascii_case("MD5")
+    {
+        return Err(anyhow!("IMS AKA digest algorithm is unsupported"));
+    }
+    let nonce_count = format!("{:08x}", registration.nonce_count.max(1));
+    let response = aka_md5_response_with_qop(
         &registration.private_identity,
         &registration.realm,
         &registration.nonce,
         "REGISTER",
         &uri,
-        &registration.aka_res_hex,
+        &registration.aka_res,
+        registration.digest_qop.as_deref(),
+        &registration.cnonce,
+        &nonce_count,
     )?;
+    let authorization_name = if registration.digest_proxy {
+        "Proxy-Authorization"
+    } else {
+        "Authorization"
+    };
+    let mut authorization = format!(
+        "{authorization_name}: Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm={}",
+        registration.private_identity,
+        registration.realm,
+        registration.nonce,
+        uri,
+        response,
+        registration.digest_algorithm,
+    );
+    if let Some(qop) = registration.digest_qop.as_deref() {
+        authorization.push_str(&format!(
+            ", qop={qop}, nc={nonce_count}, cnonce=\"{}\"",
+            registration.cnonce
+        ));
+    }
+    if let Some(opaque) = registration.digest_opaque.as_deref() {
+        authorization.push_str(&format!(", opaque=\"{opaque}\""));
+    }
     let contact_identity = registration
         .public_identity
         .strip_prefix("sip:")
         .unwrap_or(&registration.public_identity);
-    let contact = format!("sip:{}@{}:{}", contact_identity, registration.contact_host, registration.contact_port);
+    let contact = format!(
+        "sip:{}@{}:{}",
+        contact_identity, registration.contact_host, registration.contact_port
+    );
 
     Ok(format!(
         "REGISTER {uri} SIP/2.0\r\n\
@@ -99,7 +174,7 @@ CSeq: {} REGISTER\r\n\
 Contact: <{}>\r\n\
 Max-Forwards: 70\r\n\
 User-Agent: SimAdmin\r\n\
-Authorization: Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=AKAv1-MD5\r\n\
+{authorization}\r\n\
 Content-Length: 0\r\n\r\n",
         registration.contact_host,
         registration.contact_port,
@@ -107,12 +182,7 @@ Content-Length: 0\r\n\r\n",
         registration.public_identity,
         registration.call_id,
         registration.cseq,
-        contact,
-        registration.private_identity,
-        registration.realm,
-        registration.nonce,
-        uri,
-        response
+        contact
     ))
 }
 
@@ -198,6 +268,10 @@ pub fn parse_security_server(response: &str) -> Option<SecurityServer> {
 pub struct AkaChallenge {
     pub realm: String,
     pub nonce: String,
+    pub algorithm: String,
+    pub qop: Option<String>,
+    pub opaque: Option<String>,
+    pub proxy: bool,
 }
 
 pub fn build_security_client_header(
@@ -230,21 +304,113 @@ pub fn build_register_with_security(
 
 pub fn parse_aka_challenge(response: &str) -> Option<AkaChallenge> {
     let header = response.lines().find(|line| {
-        line.to_ascii_lowercase().starts_with("www-authenticate:")
-            && line.to_ascii_lowercase().contains("aka")
+        let lower = line.to_ascii_lowercase();
+        (lower.starts_with("www-authenticate:") || lower.starts_with("proxy-authenticate:"))
+            && lower.contains("aka")
     })?;
+    let proxy = header
+        .to_ascii_lowercase()
+        .starts_with("proxy-authenticate:");
     let value = header.split_once(':')?.1;
+    let parameters = parse_digest_parameters(value.trim().strip_prefix("Digest ")?);
     let parameter = |name: &str| {
-        value.split(',').find_map(|item| {
-            let (key, value) = item.trim().split_once('=')?;
-            (key.trim().eq_ignore_ascii_case(name))
-                .then(|| value.trim().trim_matches('"').to_string())
-        })
+        parameters
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
     };
+    let qop = parameter("qop").and_then(|value| {
+        value
+            .split([',', ' '])
+            .any(|candidate| candidate.eq_ignore_ascii_case("auth"))
+            .then(|| "auth".to_string())
+    });
     Some(AkaChallenge {
         realm: parameter("realm")?,
         nonce: parameter("nonce")?,
+        algorithm: parameter("algorithm").unwrap_or_else(|| "AKAv1-MD5".to_string()),
+        qop,
+        opaque: parameter("opaque"),
+        proxy,
     })
+}
+
+fn parse_digest_parameters(input: &str) -> Vec<(String, String)> {
+    let mut parameters = Vec::new();
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        while index < bytes.len()
+            && (bytes[index] == b',' || bytes[index].is_ascii_whitespace())
+        {
+            index += 1;
+        }
+        let key_start = index;
+        while index < bytes.len() && bytes[index] != b'=' {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        let key = input[key_start..index].trim().to_ascii_lowercase();
+        index += 1;
+        let value = if index < bytes.len() && bytes[index] == b'"' {
+            index += 1;
+            let value_start = index;
+            while index < bytes.len() && bytes[index] != b'"' {
+                index += 1;
+            }
+            let value = input[value_start..index].to_string();
+            index += usize::from(index < bytes.len());
+            value
+        } else {
+            let value_start = index;
+            while index < bytes.len() && bytes[index] != b',' {
+                index += 1;
+            }
+            input[value_start..index].trim().to_string()
+        };
+        parameters.push((key, value));
+    }
+    parameters
+}
+
+pub fn build_resync_authorization_header(
+    challenge: &AkaChallenge,
+    username: &str,
+    uri: &str,
+    auts: &[u8],
+    cnonce: &str,
+    nonce_count: u32,
+) -> Result<String> {
+    if username.is_empty() || uri.is_empty() || auts.is_empty() {
+        return Err(anyhow!("IMS AKA resynchronization fields must not be empty"));
+    }
+    let name = if challenge.proxy {
+        "Proxy-Authorization"
+    } else {
+        "Authorization"
+    };
+    let mut header = format!(
+        "{name}: Digest username=\"{username}\", realm=\"{}\", nonce=\"{}\", uri=\"{uri}\", response=\"\", algorithm={}, auts=\"{}\"",
+        challenge.realm,
+        challenge.nonce,
+        challenge.algorithm,
+        STANDARD.encode(auts),
+    );
+    if let Some(qop) = challenge.qop.as_deref() {
+        if cnonce.is_empty() {
+            return Err(anyhow!("IMS AKA resynchronization qop requires cnonce"));
+        }
+        header.push_str(&format!(
+            ", qop={qop}, nc={:08x}, cnonce=\"{cnonce}\"",
+            nonce_count.max(1)
+        ));
+    }
+    if let Some(opaque) = challenge.opaque.as_deref() {
+        header.push_str(&format!(", opaque=\"{opaque}\""));
+    }
+    Ok(header)
 }
 
 pub async fn send_udp_request(
@@ -302,7 +468,13 @@ mod tests {
                 public_identity: "sip:460001234567890@ims.example".into(),
                 realm: "ims.example".into(),
                 nonce: "nonce".into(),
-                aka_res_hex: "0011223344556677".into(),
+                aka_res: vec![0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
+                digest_algorithm: "AKAv1-MD5".into(),
+                digest_qop: None,
+                digest_opaque: None,
+                digest_proxy: false,
+                cnonce: "cnonce".into(),
+                nonce_count: 1,
                 call_id: "call-id".into(),
                 cseq: 1,
                 contact_host: "2001:db8::10".parse().unwrap(),
@@ -321,15 +493,85 @@ mod tests {
     }
 
     #[test]
+    fn aka_digest_uses_binary_res_bytes() {
+        let response = aka_md5_response(
+            "user@ims.example",
+            "ims.example",
+            "nonce",
+            "REGISTER",
+            "sip:ims.example",
+            &[0xde, 0xad, 0xbe, 0xef],
+        )
+        .unwrap();
+        assert_eq!(response, "964462546fc1460f275809cfd4449a7a");
+    }
+
+    #[test]
     fn parses_aka_challenge() {
         let response = "SIP/2.0 401 Unauthorized\r\nWWW-Authenticate: Digest algorithm=AKAv1-MD5, realm=\"ims.example\", nonce=\"abc\"\r\n";
         assert_eq!(
             parse_aka_challenge(response),
             Some(AkaChallenge {
                 realm: "ims.example".into(),
-                nonce: "abc".into()
+                nonce: "abc".into(),
+                algorithm: "AKAv1-MD5".into(),
+                qop: None,
+                opaque: None,
+                proxy: false,
             })
         );
+    }
+
+    #[test]
+    fn parses_proxy_challenge_with_qop_and_opaque() {
+        let response = "SIP/2.0 407 Proxy Authentication Required\r\nProxy-Authenticate: Digest realm=\"ims.example\", nonce=\"abc\", algorithm=AKAv1-MD5, qop=\"auth,auth-int\", opaque=\"xyz\"\r\n";
+        let challenge = parse_aka_challenge(response).unwrap();
+        assert!(challenge.proxy);
+        assert_eq!(challenge.qop.as_deref(), Some("auth"));
+        assert_eq!(challenge.opaque.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn builds_qop_auth_digest() {
+        let response = aka_md5_response_with_qop(
+            "user@ims.example",
+            "ims.example",
+            "nonce",
+            "REGISTER",
+            "sip:ims.example",
+            &[0xde, 0xad, 0xbe, 0xef],
+            Some("auth"),
+            "cnonce",
+            "00000001",
+        )
+        .unwrap();
+        assert_eq!(response, "1978b27b74c0ce9d628f8a67c53bf889");
+    }
+
+    #[test]
+    fn builds_auts_resynchronization_authorization() {
+        let challenge = AkaChallenge {
+            realm: "ims.example".into(),
+            nonce: "nonce".into(),
+            algorithm: "AKAv1-MD5".into(),
+            qop: Some("auth".into()),
+            opaque: Some("opaque".into()),
+            proxy: false,
+        };
+        let header = build_resync_authorization_header(
+            &challenge,
+            "user@ims.example",
+            "sip:ims.example",
+            &[0xaa, 0xbb],
+            "cnonce",
+            1,
+        )
+        .unwrap();
+        assert!(header.starts_with("Authorization: Digest"));
+        assert!(header.contains("response=\"\""));
+        assert!(header.contains("auts=\"qrs=\""));
+        assert!(header.contains("qop=auth, nc=00000001"));
+        assert!(header.contains("opaque=\"opaque\""));
     }
 
     #[test]

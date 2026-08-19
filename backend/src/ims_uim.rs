@@ -52,13 +52,13 @@ pub fn build_aka_auth_command(nonce: &str) -> Result<String> {
         .decode(nonce)
         .or_else(|_| decode_hex(nonce))
         .map_err(|_| anyhow!("IMS AKA nonce is not base64 or hexadecimal"))?;
-    if auth_data.len() != 32 {
-        return Err(anyhow!("IMS AKA nonce must contain 16-byte RAND and AUTN"));
+    if auth_data.len() < 32 {
+        return Err(anyhow!("IMS AKA nonce must contain RAND and AUTN"));
     }
     let apdu = format!(
         "008800812210{}{}",
         encode_hex(&auth_data[..16]),
-        encode_hex(&auth_data[16..])
+        encode_hex(&auth_data[16..32])
     );
     build_csim_command(&apdu)
 }
@@ -85,37 +85,63 @@ pub fn parse_aka_response(response_hex: &str) -> Result<Result<AkaResponse, AkaR
     if bytes.len() < 2 || bytes[bytes.len() - 2..] != [0x90, 0x00] {
         return Err(anyhow!("USIM AKA APDU failed"));
     }
-    let payload = &bytes[..bytes.len() - 2];
-    let mut index = 0;
-    let mut res = None;
-    let mut ck = None;
-    let mut ik = None;
-    let mut auts = None;
-    while index + 2 <= payload.len() {
-        let tag = payload[index];
-        let length = payload[index + 1] as usize;
-        index += 2;
-        if index + length > payload.len() {
-            return Err(anyhow!("truncated USIM AKA response"));
+    let payload = unwrap_authenticate_response(&bytes[..bytes.len() - 2])?;
+    match payload.first().copied() {
+        Some(0xDB) => {
+            let (res, rest) = take_lv(&payload[1..])?;
+            let (ck, rest) = take_lv(rest)?;
+            let (ik, mut rest) = take_lv(rest)?;
+            while !rest.is_empty() {
+                let (_, next) = take_lv(rest)?;
+                rest = next;
+            }
+            Ok(Ok(AkaResponse {
+                res: res.to_vec(),
+                ck: ck.to_vec(),
+                ik: ik.to_vec(),
+            }))
         }
-        let value = payload[index..index + length].to_vec();
-        match tag {
-            0xDB => res = Some(value),
-            0xDC => ck = Some(value),
-            0xDD => ik = Some(value),
-            0xDE => auts = Some(value),
-            _ => {}
+        Some(0xDC) => {
+            let (auts, rest) = take_lv(&payload[1..])?;
+            if !rest.is_empty() {
+                return Err(anyhow!("USIM AKA synchronization response has trailing data"));
+            }
+            Ok(Err(AkaResync {
+                auts: auts.to_vec(),
+            }))
         }
-        index += length;
+        _ => Err(anyhow!("USIM AKA response tag is invalid")),
     }
-    if let Some(auts) = auts {
-        return Ok(Err(AkaResync { auts }));
+}
+
+fn unwrap_authenticate_response(input: &[u8]) -> Result<&[u8]> {
+    if matches!(input.first(), Some(0xDB | 0xDC)) {
+        return Ok(input);
     }
-    Ok(Ok(AkaResponse {
-        res: res.ok_or_else(|| anyhow!("USIM AKA RES was missing"))?,
-        ck: ck.ok_or_else(|| anyhow!("USIM AKA CK was missing"))?,
-        ik: ik.ok_or_else(|| anyhow!("USIM AKA IK was missing"))?,
-    }))
+    if input.len() >= 2 {
+        let length = usize::from(input[1]);
+        if input.len() == length + 2 && matches!(input.get(2), Some(0xDB | 0xDC)) {
+            return Ok(&input[2..]);
+        }
+    }
+    if input.len() >= 3 && input[1] == 0x81 {
+        let length = usize::from(input[2]);
+        if input.len() == length + 3 && matches!(input.get(3), Some(0xDB | 0xDC)) {
+            return Ok(&input[3..]);
+        }
+    }
+    Err(anyhow!("USIM AKA response wrapper is invalid"))
+}
+
+fn take_lv(input: &[u8]) -> Result<(&[u8], &[u8])> {
+    let (&length, rest) = input
+        .split_first()
+        .ok_or_else(|| anyhow!("USIM AKA response is truncated"))?;
+    let length = usize::from(length);
+    if rest.len() < length {
+        return Err(anyhow!("USIM AKA response is truncated"));
+    }
+    Ok(rest.split_at(length))
 }
 
 #[cfg(test)]
@@ -155,8 +181,16 @@ mod tests {
     }
 
     #[test]
+    fn ignores_aka_nonce_server_data_after_rand_and_autn() {
+        let nonce = STANDARD.encode([0x11u8; 40]);
+        let command = build_aka_auth_command(&nonce).unwrap();
+        assert!(!command.contains(&"11".repeat(40)));
+        assert!(command.contains(&"11".repeat(32)));
+    }
+
+    #[test]
     fn parses_aka_material() {
-        let response = "DB02AABB DC02CCDD DD02EEFF 9000";
+        let response = "DB02AABB02CCDD02EEFF9000";
         let parsed = parse_aka_response(response).unwrap().unwrap();
         assert_eq!(parsed.res, vec![0xAA, 0xBB]);
         assert_eq!(parsed.ck, vec![0xCC, 0xDD]);
@@ -166,10 +200,25 @@ mod tests {
     #[test]
     fn parses_auts_resync() {
         assert_eq!(
-            parse_aka_response("DE02AABB9000").unwrap(),
+            parse_aka_response("DC02AABB9000").unwrap(),
             Err(AkaResync {
                 auts: vec![0xAA, 0xBB]
             })
         );
+    }
+
+    #[test]
+    fn parses_wrapped_aka_material_and_optional_tail() {
+        let parsed = parse_aka_response("800DDB02AABB02CCDD02EEFF02CAFE9000")
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.res, vec![0xAA, 0xBB]);
+        assert_eq!(parsed.ck, vec![0xCC, 0xDD]);
+        assert_eq!(parsed.ik, vec![0xEE, 0xFF]);
+    }
+
+    #[test]
+    fn rejects_truncated_aka_material() {
+        assert!(parse_aka_response("DB04AABB9000").is_err());
     }
 }

@@ -297,22 +297,27 @@ pub async fn register_native_ims(
     if identity.imsi.is_empty() {
         return Err(anyhow!("IMS modem IMSI is unavailable"));
     }
-    let domain = std::env::var("SIMADMIN_IMS_DOMAIN").unwrap_or_else(|_| {
-        let mcc = &identity.imsi[..3.min(identity.imsi.len())];
-        let mnc = if identity.imsi.len() >= 6 {
-            &identity.imsi[3..6]
-        } else {
-            "000"
-        };
-        format!("ims.mnc{mnc}.mcc{mcc}.3gppnetwork.org")
-    });
+    let home_plmn =
+        crate::ims_identity::resolve_home_plmn(&identity.imsi, Some(&identity.operator_id), None)?;
+    let ims_identity = crate::ims_identity::derive_identity(&identity.imsi, &home_plmn);
+    let domain = std::env::var("SIMADMIN_IMS_DOMAIN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(ims_identity.home_domain);
+    let private_identity = format!("{}@{}", identity.imsi, domain);
     let public_identity = format!("sip:{}@{}", identity.imsi, domain);
     let mut registration = crate::ims_sip::SipRegistration {
-        private_identity: identity.imsi.clone(),
+        private_identity,
         public_identity,
         realm: domain,
         nonce: String::new(),
-        aka_res_hex: String::new(),
+        aka_res: Vec::new(),
+        digest_algorithm: "AKAv1-MD5".to_string(),
+        digest_qop: None,
+        digest_opaque: None,
+        digest_proxy: false,
+        cnonce: format!("{:x}", md5::compute(format!("{}:cnonce", identity.imsi))),
+        nonce_count: 1,
         call_id: format!(
             "simadmin-{}",
             std::time::SystemTime::now()
@@ -333,7 +338,10 @@ pub async fn register_native_ims(
         &initial,
     )
     .await?;
-    if crate::ims_sip::sip_status_code(&challenge_response) != Some(401) {
+    if !matches!(
+        crate::ims_sip::sip_status_code(&challenge_response),
+        Some(401 | 407)
+    ) {
         return Err(anyhow!(
             "IMS initial REGISTER returned {:?}",
             crate::ims_sip::sip_status_code(&challenge_response)
@@ -365,7 +373,11 @@ pub async fn register_native_ims(
     .await?;
     registration.realm = challenge.realm;
     registration.nonce = challenge.nonce;
-    registration.aka_res_hex = crate::ims_uim::encode_hex(&aka.res);
+    registration.digest_algorithm = challenge.algorithm;
+    registration.digest_qop = challenge.qop;
+    registration.digest_opaque = challenge.opaque;
+    registration.digest_proxy = challenge.proxy;
+    registration.aka_res = aka.res;
     registration.cseq = 2;
     let security_header = crate::ims_sip::build_security_client_header(
         security.client_spi,

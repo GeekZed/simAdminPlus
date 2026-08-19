@@ -92,3 +92,18 @@ function bodies or source-level names beyond compilation paths and diagnostic
 strings. SIP/IPsec packet construction and QMI message encoding must therefore
 be reimplemented from observed behavior and 3GPP/QMI interfaces, then verified
 on the attached device.
+
+## 2026-08-19 acceptance observation
+
+The beta9 runtime was observed registered over IPsec on the dedicated `wwan1`
+IMS bearer. A live inbound IMS SMS completed the full network transaction:
+
+- the protected SIP `MESSAGE` was received;
+- the runtime submitted RP-ACK and received SIP `202` on attempt zero;
+- the decoded message was stored once as database row `11`;
+- the runtime receive counter advanced to `1` without losing registration.
+
+These values are operational evidence only. Subscriber identities and AKA key
+material are deliberately excluded. The source migration is accepted only when
+the locally built binary reproduces this behavior without loading the beta9
+executable.
