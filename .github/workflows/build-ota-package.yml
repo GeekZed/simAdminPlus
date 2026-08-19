@@ -1,6 +1,9 @@
 name: Build-OTA-Package
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
@@ -43,12 +46,19 @@ jobs:
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           CURRENT_VERSION=$(tr -d '[:space:]' < VERSION)
           VERSION=$(printf '%s' "$INPUT_VERSION" | tr -d '[:space:]')
           if [ -z "$VERSION" ] || [ "$VERSION" = "auto" ]; then
-            VERSION="$CURRENT_VERSION"
-            SOURCE="VERSION file"
+            if [ "$REF_TYPE" = "tag" ] && [[ "$REF_NAME" == v* ]]; then
+              VERSION="${REF_NAME#v}"
+              SOURCE="Git tag"
+            else
+              VERSION="$CURRENT_VERSION"
+              SOURCE="VERSION file"
+            fi
           else
             SOURCE="workflow input"
           fi
@@ -219,7 +229,7 @@ jobs:
           release_type = os.environ.get('RELEASE_TYPE', '最新正式版（latest release）')
           if not release_type:
               release_type = '最新正式版（latest release）'
-          repository = os.environ.get('REPOSITORY', '3899/SimAdmin')
+          repository = os.environ.get('REPOSITORY', 'GeekZed/simAdminPlus')
           build_time = os.environ.get('BUILD_TIME', '')
 
           changelog_path = 'docs/changelog.md'
@@ -290,7 +300,7 @@ jobs:
           generate_release_notes: false
           draft: false
           prerelease: ${{ inputs.release_type == '预发布版（pre-release）' }}
-          make_latest: ${{ inputs.release_type == '最新正式版（latest release）' }}
+          make_latest: ${{ inputs.release_type != '预发布版（pre-release）' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -311,7 +321,7 @@ jobs:
           release_type = os.environ.get('RELEASE_TYPE', '最新正式版（latest release）')
           if not release_type:
               release_type = '最新正式版（latest release）'
-          repository = os.environ.get('REPOSITORY', '3899/SimAdmin')
+          repository = os.environ.get('REPOSITORY', 'GeekZed/simAdminPlus')
           build_time = os.environ.get('BUILD_TIME', '')
 
           sums = {}
