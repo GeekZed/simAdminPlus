@@ -14,6 +14,9 @@ MODEM_RECOVERY_SCRIPT_URL="${MODEM_RECOVERY_SCRIPT_URL:-${RAW_BASE}/main/scripts
 MODEM_RECOVERY_SERVICE_URL="${MODEM_RECOVERY_SERVICE_URL:-${RAW_BASE}/main/scripts/simadmin-modem-recovery.service}"
 SECONDARY_QMI_SERVICE_URL="${SECONDARY_QMI_SERVICE_URL:-${RAW_BASE}/main/scripts/simadmin-secondary-qmi.service}"
 SECONDARY_QMI_RULE_URL="${SECONDARY_QMI_RULE_URL:-${RAW_BASE}/main/scripts/99-simadmin-secondary-qmi.rules}"
+VOLTE_RECOVERY_SCRIPT_URL="${VOLTE_RECOVERY_SCRIPT_URL:-${RAW_BASE}/main/scripts/simadmin-volte-recovery.sh}"
+VOLTE_RECOVERY_SERVICE_URL="${VOLTE_RECOVERY_SERVICE_URL:-${RAW_BASE}/main/scripts/simadmin-volte-recovery.service}"
+VOLTE_RECOVERY_TIMER_URL="${VOLTE_RECOVERY_TIMER_URL:-${RAW_BASE}/main/scripts/simadmin-volte-recovery.timer}"
 ASSET_URL="${ASSET_URL:-}"
 WFC="${WFC:-0}"
 VARIANT="${VARIANT:-}"
@@ -452,6 +455,20 @@ install_secondary_qmi_service() {
   udevadm control --reload-rules >/dev/null 2>&1 || true
   systemctl daemon-reload
   systemctl enable simadmin-secondary-qmi.service >/dev/null
+}
+
+install_volte_recovery_service() {
+  script_dst="/usr/local/bin/simadmin-volte-recovery.sh"
+  service_dst="/etc/systemd/system/simadmin-volte-recovery.service"
+  timer_dst="/etc/systemd/system/simadmin-volte-recovery.timer"
+
+  mkdir -p /usr/local/bin /etc/systemd/system
+  download_with_proxies "$VOLTE_RECOVERY_SCRIPT_URL" "$script_dst"
+  chmod 0755 "$script_dst"
+  download_with_proxies "$VOLTE_RECOVERY_SERVICE_URL" "$service_dst"
+  download_with_proxies "$VOLTE_RECOVERY_TIMER_URL" "$timer_dst"
+  systemctl daemon-reload
+  systemctl enable simadmin-volte-recovery.timer >/dev/null
 }
 
 normalize_lpac_arch() {
@@ -1209,13 +1226,17 @@ EOF
   install_modem_recovery_service
   echo "==> installing secondary QMI initializer"
   install_secondary_qmi_service
+  echo "==> installing VoLTE P-CSCF recovery timer"
+  install_volte_recovery_service
 
   echo "==> starting service"
   systemctl restart "${SERVICE_NAME}.service"
+  systemctl restart simadmin-volte-recovery.timer
 
   echo "==> done"
   echo "    service: ${SERVICE_NAME}.service"
   echo "    modem recovery: simadmin-modem-recovery.service"
+  echo "    VoLTE recovery: simadmin-volte-recovery.timer"
   echo "    install dir: ${INSTALL_DIR}"
   systemctl status "${SERVICE_NAME}.service" --no-pager
 }

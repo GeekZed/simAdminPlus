@@ -1,0 +1,11 @@
+[Unit]
+Description=Check SimAdmin VoLTE registration recovery
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=simadmin-volte-recovery.service
+
+[Install]
+WantedBy=timers.target
