@@ -762,7 +762,8 @@ pub async fn get_esim_profiles_handler(
                     entries.into_iter().map(profile_from_cache_entry).collect();
                 let needs_identity = profiles.iter().any(|profile| {
                     esim_profile_state_is_unknown(&profile.state)
-                        || esim_profile_is_active(profile) && esim_profile_sim_details_missing(profile)
+                        || esim_profile_is_active(profile)
+                            && esim_profile_sim_details_missing(profile)
                 });
                 if needs_identity {
                     match tokio::time::timeout(
@@ -3225,7 +3226,10 @@ pub async fn get_ims_status_handler() -> impl IntoResponse {
     };
     (
         StatusCode::OK,
-        Json(ApiResponse::success_with_message("IMS runtime status", status)),
+        Json(ApiResponse::success_with_message(
+            "IMS runtime status",
+            status,
+        )),
     )
 }
 
@@ -3240,7 +3244,10 @@ pub async fn get_volte_control_handler(State(app): State<AppState>) -> impl Into
     };
     (
         StatusCode::OK,
-        Json(ApiResponse::success_with_message("VoLTE control status", data)),
+        Json(ApiResponse::success_with_message(
+            "VoLTE control status",
+            data,
+        )),
     )
 }
 
@@ -3265,7 +3272,10 @@ pub async fn set_volte_feature_handler(
     };
     (
         StatusCode::OK,
-        Json(ApiResponse::success_with_message("VoLTE feature updated", data)),
+        Json(ApiResponse::success_with_message(
+            "VoLTE feature updated",
+            data,
+        )),
     )
 }
 
@@ -3603,6 +3613,77 @@ pub async fn get_system_stats(State(_dbus_conn): State<Arc<Connection>>) -> impl
             SystemStatsResponse::default(),
         )),
     )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PackageUsageCalibrationRequest {
+    pub general_total_bytes: u64,
+    pub general_used_bytes: u64,
+    pub directed_total_bytes: u64,
+    pub directed_used_bytes: u64,
+}
+
+async fn current_wwan_bytes(app: &AppState) -> (u64, u64) {
+    let interfaces = get_active_interfaces().unwrap_or_default();
+    for iface in interfaces {
+        let lower = iface.to_ascii_lowercase();
+        if lower.starts_with("wwan") || lower.starts_with("wwp") || lower.contains("mbim") {
+            if let Ok((rx, tx)) = read_interface_stats(&iface, Some(&app.dbus_conn)).await {
+                return (rx, tx);
+            }
+        }
+    }
+    (0, 0)
+}
+
+pub async fn get_package_usage_handler(State(app): State<AppState>) -> impl IntoResponse {
+    let config = app.config_manager.get_package_usage();
+    let (rx, tx) = current_wwan_bytes(&app).await;
+    let local_delta = rx
+        .saturating_sub(config.baseline_rx_bytes)
+        .saturating_add(tx.saturating_sub(config.baseline_tx_bytes));
+    let general_used = config.general_used_bytes.saturating_add(local_delta);
+    let data = PackageUsageResponse {
+        enabled: config.enabled,
+        calibrated_at: config.calibrated_at,
+        general_total_bytes: config.general_total_bytes,
+        general_used_bytes: general_used,
+        general_remaining_bytes: config.general_total_bytes.saturating_sub(general_used),
+        directed_total_bytes: config.directed_total_bytes,
+        directed_used_bytes: config.directed_used_bytes,
+        directed_remaining_bytes: config
+            .directed_total_bytes
+            .saturating_sub(config.directed_used_bytes),
+        estimated: config.enabled,
+    };
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message("Success", data)),
+    )
+}
+
+pub async fn calibrate_package_usage_handler(
+    State(app): State<AppState>,
+    Json(payload): Json<PackageUsageCalibrationRequest>,
+) -> impl IntoResponse {
+    let (rx, tx) = current_wwan_bytes(&app).await;
+    let mut config = app.config_manager.get_package_usage();
+    config.enabled = true;
+    config.general_total_bytes = payload.general_total_bytes;
+    config.general_used_bytes = payload.general_used_bytes;
+    config.directed_total_bytes = payload.directed_total_bytes;
+    config.directed_used_bytes = payload.directed_used_bytes;
+    config.baseline_rx_bytes = rx;
+    config.baseline_tx_bytes = tx;
+    config.calibrated_at = Some(chrono::Utc::now().to_rfc3339());
+    if let Err(error) = app.config_manager.set_package_usage(config) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<PackageUsageResponse>::error(error)),
+        )
+            .into_response();
+    }
+    get_package_usage_handler(State(app)).await.into_response()
 }
 
 /// GET /api/stats/cpu

@@ -55,6 +55,7 @@ import type {
   OperatorListResponse,
   OtaStatusResponse,
   OtaUploadResponse,
+  PackageUsageResponse,
   RadioMode,
   RadioModeResponse,
   RoamingRequest,
@@ -441,6 +442,22 @@ class SimAdminCurrentAPI {
   async getSimInfo() {
     return request<ApiResponse<SimInfo>>('/sim', {
       timeoutMs: 2500,
+    })
+  }
+
+  async getPackageUsage() {
+    return request<ApiResponse<PackageUsageResponse>>('/package-usage')
+  }
+
+  async calibratePackageUsage(data: {
+    general_total_bytes: number
+    general_used_bytes: number
+    directed_total_bytes: number
+    directed_used_bytes: number
+  }) {
+    return request<ApiResponse<PackageUsageResponse>>('/package-usage', {
+      method: 'POST',
+      body: JSON.stringify(data),
     })
   }
 

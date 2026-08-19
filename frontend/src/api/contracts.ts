@@ -177,6 +177,18 @@ export interface SimInfo {
   carrier_config_revision: string
 }
 
+export interface PackageUsageResponse {
+  enabled: boolean
+  calibrated_at?: string | null
+  general_total_bytes: number
+  general_used_bytes: number
+  general_remaining_bytes: number
+  directed_total_bytes: number
+  directed_used_bytes: number
+  directed_remaining_bytes: number
+  estimated: boolean
+}
+
 export interface UpdateSimCacheRequest {
   phone_number?: string
   sms_center?: string

@@ -1860,6 +1860,41 @@ pub struct VolteConfig {
     pub sms_enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageUsageConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub general_total_bytes: u64,
+    #[serde(default)]
+    pub general_used_bytes: u64,
+    #[serde(default)]
+    pub directed_total_bytes: u64,
+    #[serde(default)]
+    pub directed_used_bytes: u64,
+    #[serde(default)]
+    pub baseline_rx_bytes: u64,
+    #[serde(default)]
+    pub baseline_tx_bytes: u64,
+    #[serde(default)]
+    pub calibrated_at: Option<String>,
+}
+
+impl Default for PackageUsageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            general_total_bytes: 0,
+            general_used_bytes: 0,
+            directed_total_bytes: 0,
+            directed_used_bytes: 0,
+            baseline_rx_bytes: 0,
+            baseline_tx_bytes: 0,
+            calibrated_at: None,
+        }
+    }
+}
+
 impl Default for VolteConfig {
     fn default() -> Self {
         Self {
@@ -1905,6 +1940,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub volte: VolteConfig,
     #[serde(default)]
+    pub package_usage: PackageUsageConfig,
+    #[serde(default)]
     pub automation: AutomationConfig,
     #[serde(default)]
     pub backup: BackupConfig,
@@ -1924,6 +1961,7 @@ impl Default for AppConfig {
             work_mode: WorkMode::default(),
             esim: EsimConfig::default(),
             volte: VolteConfig::default(),
+            package_usage: PackageUsageConfig::default(),
             automation: AutomationConfig::default(),
             backup: BackupConfig::default(),
         }
@@ -2122,6 +2160,15 @@ impl ConfigManager {
             config.volte.feature_enabled = enabled;
             config.volte.sms_enabled = enabled;
         }
+        self.save()
+    }
+
+    pub fn get_package_usage(&self) -> PackageUsageConfig {
+        self.config.read().unwrap().package_usage.clone()
+    }
+
+    pub fn set_package_usage(&self, usage: PackageUsageConfig) -> Result<(), String> {
+        self.config.write().unwrap().package_usage = usage;
         self.save()
     }
 

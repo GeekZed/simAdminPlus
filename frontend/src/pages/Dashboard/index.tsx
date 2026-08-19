@@ -1,4 +1,5 @@
 import { Box, Chip, CircularProgress, Paper, Stack, Typography } from '@mui/material'
+import { useState } from 'react'
 import Grid from '@mui/material/Grid'
 import {
   CheckCircle,
@@ -17,6 +18,7 @@ import {
   SimCardInfo,
   TemperatureMonitor,
   DeviceInfoCard,
+  PackageUsageCard,
 } from './components'
 import { useDashboardData, type DashboardData } from './hooks/useDashboardData'
 
@@ -159,6 +161,7 @@ function StatusBar({ data }: { data: DashboardData }) {
 }
 
 export default function DashboardPage() {
+  const [packageUsageVisible, setPackageUsageVisible] = useState(() => localStorage.getItem('dashboard.packageUsageVisible') !== 'false')
   const { refreshInterval, refreshKey } = useRefreshInterval()
   const { initialLoading, error, setError, data, actions } = useDashboardData(refreshInterval, refreshKey)
 
@@ -188,14 +191,20 @@ export default function DashboardPage() {
               onToggleAirplaneMode={() => void actions.toggleAirplaneMode()}
               onToggleRoaming={() => void actions.toggleRoaming()}
               onToggleVolte={() => void actions.toggleVolte()}
+              packageUsageVisible={packageUsageVisible}
+              onTogglePackageUsage={() => { const next = !packageUsageVisible; setPackageUsageVisible(next); localStorage.setItem('dashboard.packageUsageVisible', String(next)) }}
             />
           </Grid>
 
-          <Grid size={{ xs: 12, md: 6, lg: 3 }}>
+          {packageUsageVisible && <Grid size={{ xs: 12, md: 6, lg: 3 }}>
+            <PackageUsageCard usage={data.packageUsage} />
+          </Grid>}
+
+          <Grid size={{ xs: 12, md: 6, lg: packageUsageVisible ? 3 : 6 }}>
             <SimCardInfo simInfo={data.simInfo} onRefresh={() => void actions.loadData()} />
           </Grid>
 
-          <Grid size={{ xs: 12, lg: 6 }}>
+          <Grid size={{ xs: 12, lg: packageUsageVisible ? 3 : 6 }}>
             <SystemResources systemStats={data.systemStats} />
           </Grid>
 

@@ -46,12 +46,12 @@ mod modem_manager;
 mod notification;
 mod notification_queue;
 mod ota;
+mod secondary_qmi;
 mod serial;
 mod sms_listener;
 mod state;
 mod system_event;
 mod system_event_monitor;
-mod secondary_qmi;
 mod utils;
 mod verification_code;
 mod volte;
@@ -849,6 +849,12 @@ async fn main() -> Result<()> {
         )
         // ========== 系统接口 ==========
         .route("/api/stats", get(get_system_stats).options(options_handler))
+        .route(
+            "/api/package-usage",
+            get(get_package_usage_handler)
+                .post(calibrate_package_usage_handler)
+                .options(options_handler),
+        )
         .route("/api/stats/cpu", get(get_cpu_info).options(options_handler))
         .route(
             "/api/connectivity",

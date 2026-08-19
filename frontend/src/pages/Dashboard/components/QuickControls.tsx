@@ -1,5 +1,5 @@
 import { Box, Card, CardContent, Typography, Stack, Switch, Chip } from '@mui/material'
-import { NetworkCheck, FlightTakeoff, TravelExplore, Tune, PhoneInTalk } from '@mui/icons-material'
+import { NetworkCheck, FlightTakeoff, TravelExplore, Tune, PhoneInTalk, DataUsage } from '@mui/icons-material'
 import type { AirplaneModeResponse, RoamingResponse, VolteControlResponse } from '@/api/types'
 
 interface QuickControlsProps {
@@ -11,6 +11,8 @@ interface QuickControlsProps {
   onToggleAirplaneMode: () => void
   onToggleRoaming: () => void
   onToggleVolte: () => void
+  packageUsageVisible: boolean
+  onTogglePackageUsage: () => void
 }
 
 export function QuickControls({
@@ -22,6 +24,8 @@ export function QuickControls({
   onToggleAirplaneMode,
   onToggleRoaming,
   onToggleVolte,
+  packageUsageVisible,
+  onTogglePackageUsage,
 }: QuickControlsProps) {
   const volteTransport = volte?.runtime.transport.toLowerCase().includes('ipsec')
     ? 'IPsec'
@@ -52,6 +56,10 @@ export function QuickControls({
         </Box>
 
         <Stack spacing={2}>
+          <Box display="flex" alignItems="center" justifyContent="space-between">
+            <Box display="flex" alignItems="center" gap={1}><DataUsage color={packageUsageVisible ? 'primary' : 'disabled'} /><Typography variant="body2">套餐信息</Typography></Box>
+            <Switch checked={packageUsageVisible} onChange={onTogglePackageUsage} color="primary" size="small" />
+          </Box>
           <Box display="flex" alignItems="center" justifyContent="space-between">
             <Box display="flex" alignItems="center" gap={1}>
               <NetworkCheck color={dataStatus ? 'success' : 'disabled'} />

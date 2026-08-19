@@ -11,6 +11,7 @@ import type {
   RoamingResponse,
   ConnectionAddressesResponse,
   VolteControlResponse,
+  PackageUsageResponse,
 } from '@/api/types'
 import { isTransientModemError, createThrottledWarner } from '@/utils/modemErrors'
 
@@ -62,6 +63,7 @@ export interface DashboardData {
   speedHistory: Record<string, InterfaceSpeedHistory>
   roaming: RoamingResponse | null
   volte: VolteControlResponse | null
+  packageUsage: PackageUsageResponse | null
 }
 
 export interface DashboardActions {
@@ -89,6 +91,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
   const [connectionAddresses, setConnectionAddresses] = useState<ConnectionAddresses>({ ipv4: [], ipv6: [] })
   const [roaming, setRoaming] = useState<RoamingResponse | null>(null)
   const [volte, setVolte] = useState<VolteControlResponse | null>(null)
+  const [packageUsage, setPackageUsage] = useState<PackageUsageResponse | null>(null)
   const [speedHistory, setSpeedHistory] = useState<Record<string, InterfaceSpeedHistory>>({})
   const speedHistoryRef = useRef<Record<string, InterfaceSpeedHistory>>({})
 
@@ -144,6 +147,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
         requestOrNull(api.getNetworkConnectionAddresses(), 'connection-addresses'),
         requestOrNull(api.getRoamingStatus(), 'roaming'),
         requestOrNull(api.getVolteControl(), 'volte'),
+        requestOrNull(api.getPackageUsage(), 'package-usage'),
         requestOrNull(api.getCellsInfo(), 'cells'),
       ])
 
@@ -161,6 +165,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
         addressesRes,
         roamingRes,
         volteRes,
+        packageUsageRes,
         cellsRes,
       ] = await fastPromise
 
@@ -172,6 +177,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       if (addressesRes?.data) setConnectionAddresses(addressesRes.data)
       if (roamingRes?.data) setRoaming(roamingRes.data)
       if (volteRes?.data) setVolte(volteRes.data)
+      if (packageUsageRes?.data) setPackageUsage(packageUsageRes.data)
       if (cellsRes?.data) setCellsInfo(cellsRes.data)
 
       // 快速数据就绪，立即解除 loading
@@ -300,6 +306,7 @@ export function useDashboardData(refreshInterval: number, refreshKey: number) {
       speedHistory,
       roaming,
       volte,
+      packageUsage,
     } as DashboardData,
     actions: {
       toggleData,

@@ -477,6 +477,19 @@ pub struct SystemStatsResponse {
     pub temperature: Vec<ThermalZone>,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct PackageUsageResponse {
+    pub enabled: bool,
+    pub calibrated_at: Option<String>,
+    pub general_total_bytes: u64,
+    pub general_used_bytes: u64,
+    pub general_remaining_bytes: u64,
+    pub directed_total_bytes: u64,
+    pub directed_used_bytes: u64,
+    pub directed_remaining_bytes: u64,
+    pub estimated: bool,
+}
+
 #[derive(Debug, Default, Serialize, Clone)]
 pub struct DiskInfo {
     pub mount_point: String,
