@@ -435,9 +435,40 @@ async fn register_native_ims(
         &ue_security.security_client_header(),
     )?;
     channel.send(initial.as_bytes()).await?;
-    let challenge_response = String::from_utf8(
+    let mut challenge_response = String::from_utf8(
         channel.receive(Duration::from_secs(10)).await?,
     )?;
+    if crate::ims_sip::sip_status_code(&challenge_response) == Some(200) {
+        registration.cseq = registration.cseq.saturating_add(1);
+        let deregister = crate::ims_sip::build_initial_register_with_security(
+            &registration,
+            "z9hG4bK-simadmin-clear-binding",
+            &format!("{}Expires: 0\r\n", ue_security.security_client_header()),
+        )?;
+        channel.send(deregister.as_bytes()).await?;
+        let deregister_response = String::from_utf8(
+            channel.receive(Duration::from_secs(10)).await?,
+        )?;
+        if matches!(crate::ims_sip::sip_status_code(&deregister_response), Some(401 | 407)) {
+            challenge_response = deregister_response;
+        } else if crate::ims_sip::sip_status_code(&deregister_response) == Some(200) {
+            registration.cseq = registration.cseq.saturating_add(1);
+            let retry = crate::ims_sip::build_initial_register_with_security(
+                &registration,
+                "z9hG4bK-simadmin-after-clear",
+                &ue_security.security_client_header(),
+            )?;
+            channel.send(retry.as_bytes()).await?;
+            challenge_response = String::from_utf8(
+                channel.receive(Duration::from_secs(10)).await?,
+            )?;
+        } else {
+            return Err(anyhow!(
+                "IMS stale-binding cleanup returned {:?}",
+                crate::ims_sip::sip_status_code(&deregister_response)
+            ));
+        }
+    }
     if !matches!(
         crate::ims_sip::sip_status_code(&challenge_response),
         Some(401 | 407)
