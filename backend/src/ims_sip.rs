@@ -400,7 +400,7 @@ pub fn build_security_client_header(
     server_port: u16,
 ) -> String {
     format!(
-        "Security-Client: ipsec-3gpp;prot=esp;mod=trans;spi-c=0x{client_spi:08x};spi-s=0x{server_spi:08x};port-c={client_port};port-s={server_port};alg=hmac-md5-96;ealg=null\r\n"
+        "Security-Client: ipsec-3gpp;alg=hmac-md5-96;ealg=null;prot=esp;mod=trans;spi-c={client_spi};spi-s={server_spi};port-c={client_port};port-s={server_port}\r\n"
     )
 }
 
@@ -785,7 +785,7 @@ mod tests {
     fn builds_beta9_ipsec_security_header() {
         let header = build_security_client_header(1, 2, 5062, 5060);
         assert!(header.contains("alg=hmac-md5-96;ealg=null"));
-        assert!(header.contains("spi-c=0x00000001"));
+        assert!(header.contains("spi-c=1;spi-s=2"));
     }
 
     #[test]

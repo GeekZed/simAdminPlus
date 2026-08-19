@@ -16,7 +16,7 @@ pub struct SecAgree {
 impl SecAgree {
     pub fn security_client_header(self) -> String {
         format!(
-            "Security-Client: ipsec-3gpp;prot=esp;mod=trans;spi-c=0x{:08x};spi-s=0x{:08x};port-c={};port-s={};alg=hmac-md5-96;ealg=null\r\n",
+            "Security-Client: ipsec-3gpp;alg=hmac-md5-96;ealg=null;prot=esp;mod=trans;spi-c={};spi-s={};port-c={};port-s={}\r\n",
             self.spi_c, self.spi_s, self.port_c, self.port_s
         )
     }
@@ -180,6 +180,14 @@ mod tests {
         assert_eq!(plan.states[1].spi, 0x12);
         assert_eq!((plan.policies[0].source_port, plan.policies[0].destination_port), (6000, 7001));
         assert_eq!((plan.policies[1].source_port, plan.policies[1].destination_port), (7000, 6001));
+    }
+
+    #[test]
+    fn security_client_uses_rfc_integer_spis() {
+        assert_eq!(
+            security(1, 2, 5062, 5064).security_client_header(),
+            "Security-Client: ipsec-3gpp;alg=hmac-md5-96;ealg=null;prot=esp;mod=trans;spi-c=1;spi-s=2;port-c=5062;port-s=5064\r\n"
+        );
     }
 
     #[test]
