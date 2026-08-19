@@ -108,17 +108,24 @@ impl ImsSipChannel {
     }
 
     pub async fn receive(&self, wait: Duration) -> Result<Vec<u8>> {
+        self.receive_optional(wait)
+            .await?
+            .ok_or_else(|| anyhow!("timed out waiting for IMS SIP datagram"))
+    }
+
+    pub async fn receive_optional(&self, wait: Duration) -> Result<Option<Vec<u8>>> {
         let socket = self
             .receive_socket
             .as_ref()
             .or(self.send_socket.as_ref())
             .ok_or_else(|| anyhow!("IMS receive socket is unavailable"))?;
         let mut frame = vec![0u8; MAX_SIP_DATAGRAM];
-        let length = tokio::time::timeout(wait, socket.recv(&mut frame))
-            .await
-            .map_err(|_| anyhow!("timed out waiting for IMS SIP datagram"))??;
+        let length = match tokio::time::timeout(wait, socket.recv(&mut frame)).await {
+            Ok(result) => result?,
+            Err(_) => return Ok(None),
+        };
         frame.truncate(length);
-        Ok(frame)
+        Ok(Some(frame))
     }
 }
 

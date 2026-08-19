@@ -69,6 +69,15 @@ struct ConfiguredImsNetwork {
     pcscf_routes: Vec<std::net::Ipv6Addr>,
 }
 
+struct NativeImsRegistration {
+    channel: crate::ims_channel::ImsSipChannel,
+    xfrm_plan: crate::ims_ipsec::XfrmPlan,
+    sip: crate::ims_sip::SipRegistration,
+    security_header: String,
+    service_routes: Vec<String>,
+    refresh_after: Duration,
+}
+
 /// Parse the stable fields emitted by `qmicli --wds-get-current-settings`.
 /// The parser intentionally ignores localized labels and fields that are not
 /// needed by the IMS path; callers must still validate that both IPv6 values
@@ -332,12 +341,12 @@ pub async fn read_secondary_bearer_settings(qmi_device: &str) -> Result<QmiBeare
         .ok_or_else(|| anyhow!("secondary IMS bearer did not provide IPv6 settings"))
 }
 
-pub async fn register_native_ims(
+async fn register_native_ims(
     conn: &Connection,
     settings: &QmiBearerSettings,
     pcscf: std::net::Ipv6Addr,
     netdev: &str,
-) -> Result<(crate::ims_channel::ImsSipChannel, crate::ims_ipsec::XfrmPlan)> {
+) -> Result<NativeImsRegistration> {
     let local: std::net::Ipv6Addr = settings
         .ipv6_address
         .parse()
@@ -411,26 +420,70 @@ pub async fn register_native_ims(
             crate::ims_sip::sip_status_code(&challenge_response)
         ));
     }
-    let challenge = crate::ims_sip::parse_aka_challenge(&challenge_response)
+    let mut challenge = crate::ims_sip::parse_aka_challenge(&challenge_response)
         .ok_or_else(|| anyhow!("IMS 401 did not contain an AKA challenge"))?;
-    let security = crate::ims_sip::parse_security_server(&challenge_response)
+    let mut security = crate::ims_sip::parse_security_server(&challenge_response)
         .ok_or_else(|| anyhow!("IMS 401 did not contain Security-Server"))?;
+    let mut security_verify = crate::ims_sip::security_server_value(&challenge_response)
+        .ok_or_else(|| anyhow!("IMS Security-Server value is unavailable"))?
+        .to_string();
+    let mut resync_attempted = false;
+    let aka = loop {
+        let aka_command = crate::ims_uim::build_aka_auth_command(&challenge.nonce)?;
+        let aka_output = crate::modem_manager::send_at_command(conn, &modem_path, &aka_command)
+            .await
+            .map_err(|error| anyhow!("IMS AKA APDU failed: {error}"))?;
+        let aka_hex = crate::ims_uim::extract_csim_hex(&aka_output)?;
+        match crate::ims_uim::parse_aka_response(&aka_hex)? {
+            Ok(aka) => break aka,
+            Err(resync) if !resync_attempted => {
+                resync_attempted = true;
+                registration.cseq = registration.cseq.saturating_add(1);
+                registration.realm = challenge.realm.clone();
+                let authorization = crate::ims_sip::build_resync_authorization_header(
+                    &challenge,
+                    &registration.private_identity,
+                    &format!("sip:{}", registration.realm),
+                    &resync.auts,
+                    &registration.cnonce,
+                    registration.nonce_count,
+                )?;
+                let headers = format!(
+                    "{authorization}\r\n{}",
+                    ue_security.security_client_header()
+                );
+                let request = crate::ims_sip::build_initial_register_with_security(
+                    &registration,
+                    "z9hG4bK-simadmin-auts",
+                    &headers,
+                )?;
+                channel.send(request.as_bytes()).await?;
+                let response = String::from_utf8(
+                    channel.receive(Duration::from_secs(10)).await?,
+                )?;
+                if !matches!(crate::ims_sip::sip_status_code(&response), Some(401 | 407)) {
+                    return Err(anyhow!(
+                        "IMS AUTS REGISTER returned {:?}",
+                        crate::ims_sip::sip_status_code(&response)
+                    ));
+                }
+                challenge = crate::ims_sip::parse_aka_challenge(&response)
+                    .ok_or_else(|| anyhow!("IMS AUTS response did not contain a new AKA challenge"))?;
+                security = crate::ims_sip::parse_security_server(&response)
+                    .ok_or_else(|| anyhow!("IMS AUTS response did not contain Security-Server"))?;
+                security_verify = crate::ims_sip::security_server_value(&response)
+                    .ok_or_else(|| anyhow!("IMS AUTS Security-Server value is unavailable"))?
+                    .to_string();
+            }
+            Err(_) => return Err(anyhow!("IMS AKA synchronization failed twice")),
+        }
+    };
     let pcscf_security = crate::ims_ipsec::SecAgree {
         spi_c: security.client_spi,
         spi_s: security.server_spi,
         port_c: security.client_port,
         port_s: security.server_port,
     };
-    let security_verify = crate::ims_sip::security_server_value(&challenge_response)
-        .ok_or_else(|| anyhow!("IMS Security-Server value is unavailable"))?
-        .to_string();
-    let aka_command = crate::ims_uim::build_aka_auth_command(&challenge.nonce)?;
-    let aka_output = crate::modem_manager::send_at_command(conn, &modem_path, &aka_command)
-        .await
-        .map_err(|error| anyhow!("IMS AKA APDU failed: {error}"))?;
-    let aka_hex = crate::ims_uim::extract_csim_hex(&aka_output)?;
-    let aka = crate::ims_uim::parse_aka_response(&aka_hex)?
-        .map_err(|_| anyhow!("IMS AKA requested AUTS resynchronization"))?;
     let xfrm_plan = crate::ims_ipsec::build_plan(local, pcscf, ue_security, pcscf_security, &aka.ik)?;
     crate::ims_ipsec::install_plan(&xfrm_plan).await?;
     if let Err(error) = channel.activate_security(
@@ -452,7 +505,7 @@ pub async fn register_native_ims(
     registration.digest_opaque = challenge.opaque;
     registration.digest_proxy = challenge.proxy;
     registration.aka_res = aka.res;
-    registration.cseq = 2;
+    registration.cseq = registration.cseq.saturating_add(1);
     registration.contact_port = ue_security.port_c;
     let security_header = format!(
         "{}Security-Verify: {}\r\n",
@@ -488,7 +541,20 @@ pub async fn register_native_ims(
             crate::ims_sip::sip_status_code(&registered)
         ));
     }
-    Ok((channel, xfrm_plan))
+    if crate::ims_sip::registration_expires(&registered) == 0 {
+        crate::ims_ipsec::uninstall_plan(&xfrm_plan).await;
+        return Err(anyhow!("IMS REGISTER response expired the binding"));
+    }
+    let refresh_after = crate::ims_sip::registration_refresh_delay(&registered);
+    let service_routes = crate::ims_sip::service_routes(&registered);
+    Ok(NativeImsRegistration {
+        channel,
+        xfrm_plan,
+        sip: registration,
+        security_header,
+        service_routes,
+        refresh_after,
+    })
 }
 
 pub async fn secondary_ims_bearer_connected(qmi_device: &str) -> Result<bool> {
@@ -743,15 +809,19 @@ pub async fn run_secondary_ims_bearer_supervisor(
                                 }
                             }
                             match register_native_ims(&conn, &settings, pcscf, &netdev).await {
-                            Ok((channel, xfrm_plan)) => {
+                            Ok(session) => {
                                 registration_succeeded = true;
-                                active_xfrm = Some(xfrm_plan);
+                                active_xfrm = Some(session.xfrm_plan);
                                 if volte.sms_enabled {
                                     let database_clone = Arc::clone(&database);
                                     let notifications_clone = Arc::clone(&notifications);
                                     sms_listener = Some(tokio::spawn(async move {
                                         if let Err(error) = crate::ims_sms::run_ims_sms_listener(
-                                            channel,
+                                            session.channel,
+                                            session.sip,
+                                            session.security_header,
+                                            session.service_routes,
+                                            session.refresh_after,
                                             database_clone,
                                             notifications_clone,
                                         )
@@ -813,6 +883,29 @@ pub async fn run_secondary_ims_bearer_supervisor(
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
+            continue;
+        }
+
+        if sms_listener.as_ref().is_some_and(|listener| listener.is_finished()) {
+            if let Some(listener) = sms_listener.take() {
+                let _ = listener.await;
+            }
+            if let Some(plan) = active_xfrm.take() {
+                crate::ims_ipsec::uninstall_plan(&plan).await;
+            }
+            if let Some(network) = active_network.take() {
+                cleanup_secondary_ipv6_interface(&network).await;
+            }
+            if let Some((device, handle)) = active.take() {
+                let _ = stop_secondary_ims_bearer(&device, &handle).await;
+            }
+            let _ = write_runtime_status(&RuntimeStatus {
+                phase: "ims_session_lost".to_string(),
+                transport: "native_qmi_ipsec".to_string(),
+                last_error: "IMS SIP session stopped; reconnecting".to_string(),
+                ..RuntimeStatus::default()
+            });
+            tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
 

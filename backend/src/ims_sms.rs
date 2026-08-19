@@ -35,7 +35,16 @@ pub fn parse_sip_message(packet: &[u8]) -> Result<(HashMap<String, String>, Vec<
             .ok_or_else(|| anyhow!("IMS SIP MESSAGE header is malformed"))?;
         parsed.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
     }
-    Ok((parsed, packet[separator + 4..].to_vec()))
+    let body = &packet[separator + 4..];
+    let content_length = parsed
+        .get("content-length")
+        .map(|value| value.parse::<usize>())
+        .transpose()?
+        .unwrap_or(body.len());
+    if body.len() < content_length {
+        return Err(anyhow!("IMS SIP MESSAGE body is truncated"));
+    }
+    Ok((parsed, body[..content_length].to_vec()))
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>> {
@@ -263,6 +272,8 @@ pub fn build_rp_ack_message(
     headers: &HashMap<String, String>,
     local: std::net::Ipv6Addr,
     local_port: u16,
+    service_routes: &[String],
+    security_verify: Option<&str>,
     body: &[u8],
 ) -> Result<Vec<u8>> {
     let target = header_uri(
@@ -287,10 +298,19 @@ pub fn build_rp_ack_message(
         .unwrap_or(1)
         .saturating_add(1);
     let branch = format!("z9hG4bK-simadmin-rp-ack-{cseq}");
-    let header = format!(
-        "MESSAGE {target} SIP/2.0\r\nVia: SIP/2.0/UDP [{local}]:{local_port};branch={branch};rport\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {cseq} MESSAGE\r\nContent-Type: application/vnd.3gpp.sms\r\nContent-Length: {}\r\n\r\n",
-        body.len()
+    let mut header = format!(
+        "MESSAGE {target} SIP/2.0\r\nVia: SIP/2.0/UDP [{local}]:{local_port};branch={branch};rport\r\nFrom: {from}\r\nTo: {to}\r\nCall-ID: {call_id}\r\nCSeq: {cseq} MESSAGE\r\n"
     );
+    for route in service_routes {
+        header.push_str(&format!("Route: {route}\r\n"));
+    }
+    if let Some(security_verify) = security_verify {
+        header.push_str(&format!("Security-Verify: {security_verify}\r\n"));
+    }
+    header.push_str(&format!(
+        "Content-Type: application/vnd.3gpp.sms\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    ));
     let mut packet = header.into_bytes();
     packet.extend_from_slice(body);
     Ok(packet)
@@ -298,15 +318,56 @@ pub fn build_rp_ack_message(
 
 pub async fn run_ims_sms_listener(
     channel: crate::ims_channel::ImsSipChannel,
+    mut registration: crate::ims_sip::SipRegistration,
+    security_header: String,
+    service_routes: Vec<String>,
+    refresh_after: std::time::Duration,
     database: Arc<Database>,
     notifications: Arc<NotificationSender>,
 ) -> Result<()> {
     let mut multipart: HashMap<(String, u16), Vec<Option<IncomingImsSms>>> = HashMap::new();
+    let mut refresh_deadline = tokio::time::Instant::now() + refresh_after;
+    let mut refresh_response_deadline = None;
     loop {
-        let packet = channel.receive(std::time::Duration::from_secs(3600)).await?;
+        let deadline = refresh_response_deadline.unwrap_or(refresh_deadline);
+        let wait = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Some(packet) = channel.receive_optional(wait).await? else {
+            if refresh_response_deadline.is_some() {
+                return Err(anyhow!("IMS REGISTER refresh timed out"));
+            }
+            registration.cseq = registration.cseq.saturating_add(1);
+            registration.nonce_count = registration.nonce_count.saturating_add(1);
+            let branch = format!("z9hG4bK-simadmin-refresh-{}", registration.cseq);
+            let request = crate::ims_sip::build_register_with_security(
+                &registration,
+                &branch,
+                &security_header,
+            )?;
+            channel.send(request.as_bytes()).await?;
+            refresh_response_deadline = Some(
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            );
+            continue;
+        };
         let Ok((headers, body)) = parse_sip_message(&packet) else {
             continue;
         };
+        let is_register_response = packet.starts_with(b"SIP/2.0 ")
+            && headers
+                .get("cseq")
+                .is_some_and(|value| value.to_ascii_uppercase().ends_with(" REGISTER"));
+        if is_register_response && refresh_response_deadline.is_some() {
+            let response = std::str::from_utf8(&packet)?;
+            let status = crate::ims_sip::sip_status_code(response)
+                .ok_or_else(|| anyhow!("IMS REGISTER refresh response is malformed"))?;
+            if !(200..300).contains(&status) {
+                return Err(anyhow!("IMS REGISTER refresh returned {status}"));
+            }
+            refresh_response_deadline = None;
+            refresh_deadline = tokio::time::Instant::now()
+                + crate::ims_sip::registration_refresh_delay(response);
+            continue;
+        }
         let is_message = packet
             .windows(2)
             .position(|window| window == b"\r\n")
@@ -324,7 +385,14 @@ pub async fn run_ims_sms_listener(
         if let Ok(ack) = build_rp_ack(&body) {
             let route = channel.route();
             if let std::net::IpAddr::V6(local) = route.local.ip() {
-                if let Ok(packet) = build_rp_ack_message(&headers, local, route.local.port(), &ack) {
+                if let Ok(packet) = build_rp_ack_message(
+                    &headers,
+                    local,
+                    route.local.port(),
+                    &service_routes,
+                    channel.security_verify(),
+                    &ack,
+                ) {
                     let _ = channel.send(&packet).await;
                 }
             }
@@ -429,6 +497,12 @@ mod tests {
     }
 
     #[test]
+    fn rejects_truncated_sip_body() {
+        let packet = b"MESSAGE sip:user@example SIP/2.0\r\nContent-Length: 4\r\n\r\nabc";
+        assert!(parse_sip_message(packet).is_err());
+    }
+
+    #[test]
     fn accepts_binary_sms_body() {
         let body = [0x00, 0x00, 0x00, 0x00, 0x01, 0x04];
         assert!(decode_ims_sms_body(&body).is_err());
@@ -450,10 +524,15 @@ mod tests {
             &headers,
             "2001:db8::10".parse().unwrap(),
             5062,
+            &["<sip:[2001:db8::2]:5060;lr>".to_string()],
+            Some("ipsec-3gpp;spi-c=1"),
             &[0x02, 0x37],
         )
         .unwrap();
-        assert!(String::from_utf8_lossy(&packet).contains("MESSAGE sip:network@example SIP/2.0"));
+        let text = String::from_utf8_lossy(&packet);
+        assert!(text.contains("MESSAGE sip:network@example SIP/2.0"));
+        assert!(text.contains("Route: <sip:[2001:db8::2]:5060;lr>\r\n"));
+        assert!(text.contains("Security-Verify: ipsec-3gpp;spi-c=1\r\n"));
         assert!(packet.ends_with(&[0x02, 0x37]));
     }
 }

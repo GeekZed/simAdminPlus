@@ -274,6 +274,46 @@ pub fn sip_status_code(response: &str) -> Option<u16> {
     fields.next()?.parse().ok()
 }
 
+pub fn registration_expires(response: &str) -> u64 {
+    let expires_header = response.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("expires")
+            .then(|| value.trim().parse::<u64>().ok())
+            .flatten()
+    });
+    let contact_expires = response.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("contact") {
+            return None;
+        }
+        value.split(';').find_map(|parameter| {
+            let (name, value) = parameter.trim().split_once('=')?;
+            name.eq_ignore_ascii_case("expires")
+                .then(|| value.trim_matches('"').parse::<u64>().ok())
+                .flatten()
+        })
+    });
+    contact_expires.or(expires_header).unwrap_or(3600)
+}
+
+pub fn registration_refresh_delay(response: &str) -> Duration {
+    let expires = registration_expires(response).max(30);
+    Duration::from_secs((expires * 4 / 5).max(15))
+}
+
+pub fn service_routes(response: &str) -> Vec<String> {
+    response
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("service-route")
+                .then(|| value.trim().to_string())
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityServer {
     pub client_spi: u32,
@@ -695,5 +735,24 @@ mod tests {
         let security = parse_security_server(response).unwrap();
         assert_eq!(security.client_spi, 12_345_678);
         assert_eq!(security.server_spi, 87_654_321);
+    }
+
+    #[test]
+    fn contact_expiry_controls_registration_refresh() {
+        let response = "SIP/2.0 200 OK\r\nExpires: 3600\r\nContact: <sip:user@example>;expires=120\r\n\r\n";
+        assert_eq!(registration_expires(response), 120);
+        assert_eq!(registration_refresh_delay(response), Duration::from_secs(96));
+    }
+
+    #[test]
+    fn preserves_service_routes_from_registration() {
+        let response = "SIP/2.0 200 OK\r\nService-Route: <sip:[2001:db8::1]:5060;lr>\r\nService-Route: <sip:[2001:db8::2]:5060;lr>\r\n\r\n";
+        assert_eq!(
+            service_routes(response),
+            vec![
+                "<sip:[2001:db8::1]:5060;lr>",
+                "<sip:[2001:db8::2]:5060;lr>"
+            ]
+        );
     }
 }
