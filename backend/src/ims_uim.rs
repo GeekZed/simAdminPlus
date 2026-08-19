@@ -2,6 +2,8 @@
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use std::time::Duration;
+use tokio::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AkaResponse {
@@ -47,6 +49,16 @@ pub fn extract_csim_hex(response: &str) -> Result<String> {
 }
 
 pub fn build_aka_auth_command(nonce: &str) -> Result<String> {
+    let (rand, autn) = decode_aka_nonce(nonce)?;
+    let apdu = format!(
+        "008800812210{}{}",
+        encode_hex(&rand),
+        encode_hex(&autn)
+    );
+    build_csim_command(&apdu)
+}
+
+fn decode_aka_nonce(nonce: &str) -> Result<(Vec<u8>, Vec<u8>)> {
     let nonce = nonce.trim().trim_matches('"');
     let auth_data = STANDARD
         .decode(nonce)
@@ -55,12 +67,99 @@ pub fn build_aka_auth_command(nonce: &str) -> Result<String> {
     if auth_data.len() < 32 {
         return Err(anyhow!("IMS AKA nonce must contain RAND and AUTN"));
     }
-    let apdu = format!(
-        "008800812210{}{}",
-        encode_hex(&auth_data[..16]),
-        encode_hex(&auth_data[16..32])
+    Ok((auth_data[..16].to_vec(), auth_data[16..32].to_vec()))
+}
+
+pub async fn authenticate_via_qmi(nonce: &str) -> Result<Result<AkaResponse, AkaResync>> {
+    let (rand, autn) = decode_aka_nonce(nonce)?;
+    let device = std::env::var("SIMADMIN_PRIMARY_QMI_DEVICE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "/dev/wwan0qmi0".to_string());
+    let slot = std::env::var("SIMADMIN_UIM_SLOT")
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(1);
+    let open_arg = format!("--uim-open-logical-channel={slot},A0000000871002");
+    let open = run_qmicli(&device, &["--client-no-release-cid", &open_arg]).await?;
+    let channel = open.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Open Logical Channel operation successfully completed:")?
+            .trim()
+            .parse::<u8>()
+            .ok()
+    }).ok_or_else(|| anyhow!("QMI UIM did not return a logical channel"))?;
+    let client_id = open.lines().find_map(|line| {
+        let (label, value) = line.trim().split_once(':')?;
+        (label == "CID").then(|| value.trim().trim_matches('\'').to_string())
+    }).filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("QMI UIM did not retain a client ID"))?;
+
+    let mut apdu = format!(
+        "008800812210{}{}00",
+        encode_hex(&rand),
+        encode_hex(&autn)
     );
-    build_csim_command(&apdu)
+    let response = send_qmi_apdu(&device, slot, channel, &client_id, &apdu).await;
+    let response = match response {
+        Ok(response) if response.len() >= 4 && response[response.len() - 4..response.len() - 2].eq_ignore_ascii_case("61") => {
+            let length = &response[response.len() - 2..];
+            send_qmi_apdu(
+                &device,
+                slot,
+                channel,
+                &client_id,
+                &format!("00C00000{length}"),
+            ).await
+        }
+        Ok(response) if response.len() >= 4 && response[response.len() - 4..response.len() - 2].eq_ignore_ascii_case("6C") => {
+            apdu.replace_range(apdu.len() - 2.., &response[response.len() - 2..]);
+            send_qmi_apdu(&device, slot, channel, &client_id, &apdu).await
+        }
+        response => response,
+    };
+    let close_arg = format!("--uim-close-logical-channel={slot},{channel}");
+    let cid_arg = format!("--client-cid={client_id}");
+    let _ = run_qmicli(&device, &[&cid_arg, &close_arg]).await;
+    parse_aka_response(&response?)
+}
+
+async fn send_qmi_apdu(
+    device: &str,
+    slot: u8,
+    channel: u8,
+    client_id: &str,
+    apdu: &str,
+) -> Result<String> {
+    let cid_arg = format!("--client-cid={client_id}");
+    let send_arg = format!("--uim-send-apdu={slot},{channel},{apdu}");
+    let output = run_qmicli(
+        device,
+        &[&cid_arg, "--client-no-release-cid", &send_arg],
+    ).await?;
+    let value = output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Send APDU operation successfully completed:")
+    }).ok_or_else(|| anyhow!("QMI UIM did not return an APDU response"))?;
+    Ok(value.trim().replace(':', ""))
+}
+
+async fn run_qmicli(device: &str, action: &[&str]) -> Result<String> {
+    let mut args = vec!["-d", device, "--device-open-proxy", "--device-open-qmi"];
+    args.extend_from_slice(action);
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new("qmicli").kill_on_drop(true).args(args).output(),
+    )
+    .await
+    .map_err(|_| anyhow!("QMI UIM operation timed out"))??;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "QMI UIM operation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 pub fn encode_hex(bytes: &[u8]) -> String {

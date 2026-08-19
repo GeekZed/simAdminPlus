@@ -381,9 +381,6 @@ async fn register_native_ims(
         .ipv6_address
         .parse()
         .map_err(|_| anyhow!("IMS bearer IPv6 address is invalid"))?;
-    let modem_path = crate::modem_manager::find_modem_path(conn)
-        .await
-        .map_err(|error| anyhow!("cannot find modem for IMS AKA: {error}"))?;
     let identity = crate::modem_manager::current_sim_identity(conn)
         .await
         .ok_or_else(|| anyhow!("IMS modem identity is unavailable"))?;
@@ -459,12 +456,7 @@ async fn register_native_ims(
         .to_string();
     let mut resync_attempted = false;
     let aka = loop {
-        let aka_command = crate::ims_uim::build_aka_auth_command(&challenge.nonce)?;
-        let aka_output = crate::modem_manager::send_at_command(conn, &modem_path, &aka_command)
-            .await
-            .map_err(|error| anyhow!("IMS AKA APDU failed: {error}"))?;
-        let aka_hex = crate::ims_uim::extract_csim_hex(&aka_output)?;
-        match crate::ims_uim::parse_aka_response(&aka_hex)? {
+        match crate::ims_uim::authenticate_via_qmi(&challenge.nonce).await? {
             Ok(aka) => break aka,
             Err(resync) if !resync_attempted => {
                 resync_attempted = true;
@@ -727,67 +719,10 @@ pub async fn run_secondary_ims_bearer_supervisor(
                     active = Some((device.clone(), handle));
                     let mut pcscf_candidates = Vec::new();
                     let _ = write_runtime_status(&RuntimeStatus {
-                        phase: "usim_aid_selecting".to_string(),
+                        phase: "pcscf_discovering".to_string(),
                         transport: "native_qmi".to_string(),
                         ..RuntimeStatus::default()
                     });
-                    match crate::modem_manager::find_modem_path(&conn).await {
-                        Ok(modem_path) => {
-                            let command = match crate::ims_uim::build_csim_command(
-                                "00A4040007A0000000871002",
-                            ) {
-                                Ok(command) => command,
-                                Err(error) => {
-                                    let _ = write_runtime_status(&RuntimeStatus {
-                                        phase: "usim_aid_failed".to_string(),
-                                        transport: "native_qmi".to_string(),
-                                        last_error: error.to_string(),
-                                        ..RuntimeStatus::default()
-                                    });
-                                    continue;
-                                }
-                            };
-                            match crate::modem_manager::send_at_command(
-                                &conn,
-                                &modem_path,
-                                &command,
-                            )
-                            .await
-                            {
-                                Ok(response) => match crate::ims_uim::extract_csim_hex(&response)
-                                    .and_then(|hex| {
-                                        crate::ims_uim::parse_aid_from_select_response(&hex)
-                                            .map(|_| ())
-                                    }) {
-                                    Ok(()) => {}
-                                    Err(error) => {
-                                        let _ = write_runtime_status(&RuntimeStatus {
-                                            phase: "usim_aid_failed".to_string(),
-                                            transport: "native_qmi".to_string(),
-                                            last_error: error.to_string(),
-                                            ..RuntimeStatus::default()
-                                        });
-                                    }
-                                },
-                                Err(error) => {
-                                    let _ = write_runtime_status(&RuntimeStatus {
-                                        phase: "usim_aid_failed".to_string(),
-                                        transport: "native_qmi".to_string(),
-                                        last_error: error,
-                                        ..RuntimeStatus::default()
-                                    });
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            let _ = write_runtime_status(&RuntimeStatus {
-                                phase: "usim_aid_failed".to_string(),
-                                transport: "native_qmi".to_string(),
-                                last_error: error.to_string(),
-                                ..RuntimeStatus::default()
-                            });
-                        }
-                    }
                     if let Ok(modem_path) = crate::modem_manager::find_modem_path(&conn).await {
                         match crate::modem_manager::send_at_command(
                             &conn,
@@ -884,6 +819,7 @@ pub async fn run_secondary_ims_bearer_supervisor(
                                 break;
                             }
                             Err(error) => {
+                                tracing::warn!(pcscf = %pcscf, error = %error, "IMS registration attempt failed");
                                 let _ = write_runtime_status(&RuntimeStatus {
                                     phase: "register_failed".to_string(),
                                     transport: "native_qmi_ipsec".to_string(),
@@ -908,11 +844,13 @@ pub async fn run_secondary_ims_bearer_supervisor(
                             let _ = stop_secondary_ims_bearer(&active_device, &active_handle).await;
                         }
                         let _ = write_runtime_status(&RuntimeStatus {
-                            phase: "bearer_connected".to_string(),
+                            phase: "register_failed".to_string(),
                             transport: "native_qmi".to_string(),
                             interface: netdev.clone(),
+                            last_error: "all IMS P-CSCF registration attempts failed".to_string(),
                             ..RuntimeStatus::default()
                         });
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                 }
                 Err(error) => {
