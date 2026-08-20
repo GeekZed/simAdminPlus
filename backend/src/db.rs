@@ -891,7 +891,7 @@ impl Database {
     pub fn get_ims_sms_receipt(&self, marker: &str) -> Result<Option<(bool, bool, i64)>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT notification_succeeded, acked
+            "SELECT notification_succeeded, acked, sms_id
              FROM ims_sms_receipts
              WHERE marker = ?1",
             params![marker],
@@ -900,6 +900,33 @@ impl Database {
                     row.get::<_, i64>(0)? != 0,
                     row.get::<_, i64>(1)? != 0,
                     row.get::<_, Option<i64>>(2)?.unwrap_or_default(),
+                ))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn get_recent_ims_sms_receipt(
+        &self,
+        phone_number: &str,
+        content: &str,
+    ) -> Result<Option<(bool, bool, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT notification_succeeded, acked, COALESCE(sms_id, 0)
+             FROM ims_sms_receipts
+             WHERE phone_number = ?1
+               AND content = ?2
+               AND created_at >= datetime('now', '-24 hours')
+             ORDER BY created_at DESC
+             LIMIT 1",
+            params![phone_number, content],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get(2)?,
                 ))
             },
         )

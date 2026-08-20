@@ -623,9 +623,23 @@ pub async fn run_ims_sms_listener(
                 concat: None,
             };
         }
-        let receipt = database.get_ims_sms_receipt(&incoming.marker)?;
+        let receipt = database
+            .get_ims_sms_receipt(&incoming.marker)?
+            .or(database.get_recent_ims_sms_receipt(&incoming.phone_number, &incoming.content)?);
         let (mut notification_succeeded, acked, id) = match receipt {
             Some((notification_succeeded, acked, id)) => {
+                database.record_ims_sms_receipt(
+                    &incoming.marker,
+                    &incoming.phone_number,
+                    &incoming.content,
+                    id,
+                )?;
+                if notification_succeeded {
+                    database.mark_ims_sms_notification_succeeded(&incoming.marker)?;
+                }
+                if acked {
+                    database.mark_ims_sms_acked(&incoming.marker)?;
+                }
                 (notification_succeeded, acked, id)
             }
             None => {
