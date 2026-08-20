@@ -162,7 +162,7 @@ jobs:
           mkdir -p package/lpac
           curl -fsSL "https://github.com/${LPAC_REPO}/releases/download/v${LPAC_VERSION}/lpac-linux-${ARCH}-with-qmi.zip" \
             -o "package/lpac/lpac-linux-${ARCH}-with-qmi.zip"
-          unzip -l "package/lpac/lpac-linux-${ARCH}-with-qmi.zip" | grep -Eq '(^|/)lpac$'
+          unzip -Z1 "package/lpac/lpac-linux-${ARCH}-with-qmi.zip" | grep -Eq '(^|/)lpac$'
 
       - name: Assemble standalone installer
         env:
