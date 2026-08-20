@@ -1,0 +1,285 @@
+name: Build-Install-Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'SimAdmin 版本号（例如：1.0.4；auto 使用 VERSION）'
+        required: false
+        type: string
+        default: 'auto'
+      lpac_version:
+        description: 'lpac 版本号（例如：2.3.0；latest 使用上游最新版本）'
+        required: false
+        type: string
+        default: 'latest'
+      release_type:
+        description: '发布类型（Release type）'
+        required: true
+        type: choice
+        default: '最新正式版（latest release）'
+        options:
+          - '最新正式版（latest release）'
+          - '预发布版（pre-release）'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  LPAC_REPO: estkme-group/lpac
+
+jobs:
+  prepare:
+    name: Resolve versions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      lpac_version: ${{ steps.lpac.outputs.version }}
+      release_type: ${{ steps.release_type.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve SimAdmin version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          current_version="$(tr -d '[:space:]' < VERSION)"
+          version="$(printf '%s' "$INPUT_VERSION" | tr -d '[:space:]')"
+          if [ -z "$version" ] || [ "$version" = auto ]; then
+            if [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" == v* ]]; then
+              version="${REF_NAME#v}"
+            else
+              version="$current_version"
+            fi
+          fi
+          printf '%s\n' "$version" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}([-.][0-9A-Za-z]+)*$'
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve lpac version
+        id: lpac
+        env:
+          INPUT_LPAC_VERSION: ${{ inputs.lpac_version }}
+        run: |
+          set -euo pipefail
+          version="$(printf '%s' "$INPUT_LPAC_VERSION" | tr -d '[:space:]')"
+          if [ -z "$version" ] || [ "$version" = latest ]; then
+            version="$(curl -fsSL "https://api.github.com/repos/${LPAC_REPO}/releases/latest" | jq -r '.tag_name')"
+          fi
+          version="${version#v}"
+          printf '%s\n' "$version" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}([-.][0-9A-Za-z]+)*$'
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release type
+        id: release_type
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: echo "value=${INPUT_RELEASE_TYPE:-最新正式版（latest release）}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build install package (${{ matrix.arch }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync version numbers
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          printf '%s\n' "$VERSION" > VERSION
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" backend/Cargo.toml
+          perl -0pi -e 's/(name = "simadmin"\nversion = ")[^"]+/$1$ENV{VERSION}/' backend/Cargo.lock
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" frontend/package.json
+
+      - name: Install build tools
+        run: |
+          sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          sudo apt-get -o Acquire::Retries=1 update
+          sudo apt-get -o Acquire::Retries=1 install -y musl-tools zip unzip jq
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Build backend
+        working-directory: backend
+        env:
+          TARGET: ${{ matrix.target }}
+          SQLITE3_STATIC: '1'
+          LIBSQLITE3_SYS_USE_PKG_CONFIG: '0'
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            aarch64-unknown-linux-musl)
+              export CC_aarch64_unknown_linux_musl=musl-gcc
+              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+              ;;
+            x86_64-unknown-linux-musl)
+              export CC_x86_64_unknown_linux_musl=musl-gcc
+              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+              ;;
+          esac
+          cargo build --locked --release --target "$TARGET"
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run lint
+          pnpm exec vite build
+
+      - name: Download lpac
+        env:
+          LPAC_VERSION: ${{ needs.prepare.outputs.lpac_version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p package/lpac
+          curl -fsSL "https://github.com/${LPAC_REPO}/releases/download/v${LPAC_VERSION}/lpac-linux-${ARCH}-with-qmi.zip" \
+            -o "package/lpac/lpac-linux-${ARCH}-with-qmi.zip"
+          unzip -l "package/lpac/lpac-linux-${ARCH}-with-qmi.zip" | grep -Eq '(^|/)lpac$'
+
+      - name: Assemble standalone installer
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          LPAC_VERSION: ${{ needs.prepare.outputs.lpac_version }}
+        run: |
+          set -euo pipefail
+          root="package/simadmin-install-${VERSION}-${ARCH}"
+          mkdir -p "$root/payload" "$root/lpac"
+
+          tmp_pkg="$(mktemp -d)"
+          mkdir -p "$tmp_pkg/www" "$tmp_pkg/system"
+          cp "backend/target/${TARGET}/release/simadmin" "$tmp_pkg/simadmin"
+          chmod 0755 "$tmp_pkg/simadmin"
+          cp -R frontend/dist/. "$tmp_pkg/www/"
+          cp scripts/simadmin.service scripts/simadmin-secondary-qmi.service \
+            scripts/simadmin-modem-recovery.service scripts/simadmin-modem-recovery.sh \
+            scripts/99-simadmin-secondary-qmi.rules "$tmp_pkg/system/"
+          chmod 0755 "$tmp_pkg/system/simadmin-modem-recovery.sh"
+          cat > "$tmp_pkg/meta.json" <<EOF
+          {
+            "version": "${VERSION}",
+            "commit": "${GITHUB_SHA}",
+            "build_time": "$(TZ=Asia/Shanghai date +'%Y-%m-%dT%H:%M:%S+08:00')",
+            "arch": "${TARGET}",
+            "package_type": "standalone-install"
+          }
+          EOF
+          tar -czf "$root/payload/simadmin-${ARCH}.tar.gz" -C "$tmp_pkg" meta.json simadmin www system
+          cp package/lpac/*.zip "$root/lpac/"
+          cp install_latest.sh "$root/"
+
+          cat > "$root/install.sh" <<EOF
+          #!/bin/sh
+          set -eu
+          bundle_dir=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+          arch=\$(uname -m)
+          case "\$arch" in
+            aarch64|arm64) arch=aarch64 ;;
+            x86_64|amd64) arch=x86_64 ;;
+            *) echo "unsupported architecture: \$arch" >&2; exit 1 ;;
+          esac
+          asset="\$bundle_dir/payload/simadmin-\${arch}.tar.gz"
+          lpac="\$bundle_dir/lpac/lpac-linux-\${arch}-with-qmi.zip"
+          [ -f "\$asset" ] || { echo "missing application payload: \$asset" >&2; exit 1; }
+          [ -f "\$lpac" ] || { echo "missing lpac payload: \$lpac" >&2; exit 1; }
+          exec env \
+            VERSION='${VERSION}' \
+            ASSET_NAME="simadmin-\${arch}.tar.gz" \
+            ASSET_URL="file://\${asset}" \
+            LPAC_ASSET_URL="file://\${lpac}" \
+            LPAC_TARGET_VERSION='${LPAC_VERSION}' \
+            LPAC_ASSET_FLAVOR=default \
+            sh "\$bundle_dir/install_latest.sh" "\$@"
+          EOF
+          chmod 0755 "$root/install.sh" "$root/install_latest.sh"
+          cat > "$root/README.txt" <<EOF
+          SimAdmin standalone installer
+          Version: ${VERSION}
+          Architecture: ${ARCH}
+          lpac version: ${LPAC_VERSION}
+
+          Run as root on Debian/Ubuntu:
+            sudo ./install.sh
+          EOF
+          sha256sum "$root/payload"/* "$root/lpac"/* > "$root/SHA256SUMS"
+          mkdir -p release
+          tar -czf "release/simadmin-install-${VERSION}-${ARCH}.tar.gz" -C package "simadmin-install-${VERSION}-${ARCH}"
+          tar -tzf "release/simadmin-install-${VERSION}-${ARCH}.tar.gz" | grep -E '/(install\.sh|install_latest\.sh|README\.txt|lpac/|payload/)' >/dev/null
+
+      - name: Upload standalone installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+          path: release/simadmin-install-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish standalone installers
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: install-${{ needs.prepare.outputs.version }}-*
+          path: release
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: sha256sum release/*.tar.gz > release/SHA256SUMS
+
+      - name: Publish standalone installers
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: SimAdmin standalone installer v${{ needs.prepare.outputs.version }}
+          files: |
+            release/simadmin-install-*.tar.gz
+            release/SHA256SUMS
+          body: |
+            独立安装包，包含安装脚本、SimAdmin 应用包和对应架构的 lpac。
+            设备侧执行解压后的 `install.sh`，脚本仍会自动安装系统依赖、配置并启动服务。
+          prerelease: ${{ needs.prepare.outputs.release_type == '预发布版（pre-release）' }}
+          make_latest: ${{ needs.prepare.outputs.release_type != '预发布版（pre-release）' }}
+          overwrite_files: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

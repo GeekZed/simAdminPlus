@@ -88,6 +88,23 @@ cargo run -- --host :: --port 3000
 
 GitHub Actions 会在 ARM64 与 x86_64 原生 runner 上并行构建，发布 `simadmin-arm64.tar.gz` 与 `simadmin-amd64.tar.gz`；`simadmin.tar.gz` 继续作为 ARM64 兼容别名。
 
+### 构建独立安装包
+
+GitHub Actions 中的 `Build-Install-Package` 会构建并发布独立安装包。每个架构的压缩包都包含：
+
+- `install.sh`：离线调用首次部署逻辑的入口；
+- `install_latest.sh`：安装依赖、校验架构、安装文件、配置并启动服务；
+- 对应架构的 SimAdmin 应用包；
+- 对应架构的 `lpac`（带 QMI 后端）。
+
+在 Actions 页面手动运行该 workflow，通常使用 `version=auto`、`lpac_version=latest` 和正式版发布类型。下载后解压，在 Debian/Ubuntu 设备上执行：
+
+```bash
+sudo ./install.sh
+```
+
+应用和 `lpac` 会从安装包本地读取；首次部署所需的 Debian/Ubuntu 系统依赖仍由安装脚本通过 `apt` 安装。
+
 ### 通过 ADB 部署
 
 ```bash
