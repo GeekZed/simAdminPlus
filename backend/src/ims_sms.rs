@@ -25,6 +25,7 @@ pub struct ConcatInfo {
 
 struct PendingRpAck {
     packet: Vec<u8>,
+    marker: String,
     deadline: tokio::time::Instant,
     attempts: u8,
 }
@@ -409,6 +410,55 @@ pub fn build_rp_ack_message(
     Ok(packet)
 }
 
+async fn send_ims_delivery_ack(
+    channel: &crate::ims_channel::ImsSipChannel,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+    registration: &crate::ims_sip::SipRegistration,
+    service_routes: &[String],
+    security_verify: Option<&str>,
+    marker: &str,
+    pending_rp_acks: &mut HashMap<(String, u32), PendingRpAck>,
+) -> Result<()> {
+    let ack = build_rp_ack(body)?;
+    let response = sip_ok_response(headers);
+    channel.send(response.as_bytes()).await?;
+
+    let route = channel.route();
+    if let std::net::IpAddr::V6(local) = route.local.ip() {
+        let packet = build_rp_ack_message(
+            headers,
+            local,
+            route.local.port(),
+            route.remote,
+            &registration.public_identity,
+            service_routes,
+            security_verify,
+            &ack,
+        )?;
+        channel.send(&packet).await?;
+        if let Ok((ack_headers, _)) = parse_sip_message(&packet) {
+            let call_id = ack_headers.get("call-id").cloned().unwrap_or_default();
+            let cseq = ack_headers
+                .get("cseq")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_default();
+            pending_rp_acks.insert(
+                (call_id, cseq),
+                PendingRpAck {
+                    packet,
+                    marker: marker.to_string(),
+                    deadline: tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(3),
+                    attempts: 1,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_ims_sms_listener(
     channel: crate::ims_channel::ImsSipChannel,
     mut registration: crate::ims_sip::SipRegistration,
@@ -507,7 +557,9 @@ pub async fn run_ims_sms_listener(
             let warning = headers.get("warning").map(String::as_str).unwrap_or("none");
             tracing::info!(status, reason, warning, matched, "IMS RP-ACK SIP response received");
             if (200..300).contains(&status) {
-                pending_rp_acks.remove(&(call_id, cseq));
+                if let Some(ack) = pending_rp_acks.remove(&(call_id, cseq)) {
+                    database.mark_ims_sms_acked(&ack.marker)?;
+                }
             } else if status >= 300 {
                 if let Some(ack) = pending_rp_acks.get_mut(&(call_id, cseq)) {
                     ack.deadline = tokio::time::Instant::now();
@@ -526,50 +578,6 @@ pub async fn run_ims_sms_listener(
             .unwrap_or_default();
         if !is_message || !content_type.contains("application/vnd.3gpp.sms") {
             continue;
-        }
-        let response = sip_ok_response(&headers);
-        let _ = channel.send(response.as_bytes()).await;
-        let ack = build_rp_ack(&body);
-        if let Err(error) = &ack {
-            tracing::warn!(
-                error = %error,
-                body_bytes = body.len(),
-                "IMS MT SMS RP-ACK body could not be built"
-            );
-        }
-        if let Ok(ack) = ack {
-            let route = channel.route();
-            if let std::net::IpAddr::V6(local) = route.local.ip() {
-                if let Ok(packet) = build_rp_ack_message(
-                    &headers,
-                    local,
-                    route.local.port(),
-                    route.remote,
-                    &registration.public_identity,
-                    &service_routes,
-                    channel.security_verify(),
-                    &ack,
-                ) {
-                    channel.send(&packet).await?;
-                    if let Ok((ack_headers, _)) = parse_sip_message(&packet) {
-                        let call_id = ack_headers.get("call-id").cloned().unwrap_or_default();
-                        let cseq = ack_headers
-                            .get("cseq")
-                            .and_then(|value| value.split_whitespace().next())
-                            .and_then(|value| value.parse::<u32>().ok())
-                            .unwrap_or_default();
-                        pending_rp_acks.insert(
-                            (call_id, cseq),
-                            PendingRpAck {
-                                packet,
-                                deadline: tokio::time::Instant::now()
-                                    + std::time::Duration::from_secs(3),
-                                attempts: 1,
-                            },
-                        );
-                    }
-                }
-            }
         }
         let mut incoming = match decode_ims_sms_body(&body) {
             Ok(incoming) => incoming,
@@ -615,29 +623,81 @@ pub async fn run_ims_sms_listener(
                 concat: None,
             };
         }
-        if database.sms_exists_by_pdu(&incoming.marker)? {
+        let receipt = database.get_ims_sms_receipt(&incoming.marker)?;
+        let (mut notification_succeeded, acked, id) = match receipt {
+            Some((notification_succeeded, acked, id)) => {
+                (notification_succeeded, acked, id)
+            }
+            None => {
+                let timestamp = beijing_sms_now_string();
+                let id = database.insert_sms_at_with_transport(
+                    "incoming",
+                    &incoming.phone_number,
+                    &incoming.content,
+                    &timestamp,
+                    "received",
+                    Some(&incoming.marker),
+                    "volte_ims",
+                )?;
+                database.record_ims_sms_receipt(
+                    &incoming.marker,
+                    &incoming.phone_number,
+                    &incoming.content,
+                    id,
+                )?;
+                (false, false, id)
+            }
+        };
+
+        if acked {
+            let _ = send_ims_delivery_ack(
+                &channel,
+                &headers,
+                &body,
+                &registration,
+                &service_routes,
+                channel.security_verify(),
+                &incoming.marker,
+                &mut pending_rp_acks,
+            )
+            .await;
             continue;
         }
-        let timestamp = beijing_sms_now_string();
-        let id = database.insert_sms_at_with_transport(
-            "incoming",
-            &incoming.phone_number,
-            &incoming.content,
-            &timestamp,
-            "received",
-            Some(&incoming.marker),
-            "volte_ims",
-        )?;
-        let message = SmsMessage {
-            id,
-            direction: "incoming".to_string(),
-            phone_number: incoming.phone_number,
-            content: incoming.content,
-            timestamp,
-            status: "received".to_string(),
-            pdu: Some(incoming.marker),
-        };
-        let _ = notifications.forward_sms(&message).await;
+
+        if !notification_succeeded {
+            let message = SmsMessage {
+                id,
+                direction: "incoming".to_string(),
+                phone_number: incoming.phone_number.clone(),
+                content: incoming.content.clone(),
+                timestamp: beijing_sms_now_string(),
+                status: "received".to_string(),
+                pdu: Some(incoming.marker.clone()),
+            };
+            if notifications.forward_sms(&message).await.is_err() {
+                tracing::warn!(marker = %incoming.marker, "IMS SMS notification failed; RP-ACK withheld");
+                continue;
+            }
+            database.mark_ims_sms_notification_succeeded(&incoming.marker)?;
+            notification_succeeded = true;
+        }
+
+        if notification_succeeded {
+            if let Err(error) = send_ims_delivery_ack(
+                &channel,
+                &headers,
+                &body,
+                &registration,
+                &service_routes,
+                channel.security_verify(),
+                &incoming.marker,
+                &mut pending_rp_acks,
+            )
+            .await
+            {
+                tracing::warn!(error = %error, marker = %incoming.marker, "IMS SMS RP-ACK failed");
+            }
+        }
     }
 }
 

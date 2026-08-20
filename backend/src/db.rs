@@ -422,6 +422,32 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_sms_notification_status ON sms_messages(notification_status)",
             [],
         )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ims_sms_receipts (
+                marker TEXT PRIMARY KEY,
+                phone_number TEXT NOT NULL,
+                content TEXT NOT NULL,
+                sms_id INTEGER,
+                notification_succeeded INTEGER NOT NULL DEFAULT 0,
+                acked INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                acked_at TEXT
+            )",
+            [],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO ims_sms_receipts
+             (marker, phone_number, content, sms_id, notification_succeeded, acked)
+             SELECT pdu, phone_number, content, id,
+                    CASE WHEN notification_status = 'success' THEN 1 ELSE 0 END,
+                    CASE WHEN notification_status = 'success' THEN 1 ELSE 0 END
+             FROM sms_messages
+             WHERE direction = 'incoming'
+               AND transport = 'volte_ims'
+               AND pdu IS NOT NULL",
+            [],
+        )?;
         normalize_existing_sms_timestamps(&conn)?;
 
         conn.execute(
@@ -860,6 +886,64 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    pub fn get_ims_sms_receipt(&self, marker: &str) -> Result<Option<(bool, bool, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT notification_succeeded, acked
+             FROM ims_sms_receipts
+             WHERE marker = ?1",
+            params![marker],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, Option<i64>>(2)?.unwrap_or_default(),
+                ))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn record_ims_sms_receipt(
+        &self,
+        marker: &str,
+        phone_number: &str,
+        content: &str,
+        sms_id: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO ims_sms_receipts
+             (marker, phone_number, content, sms_id)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![marker, phone_number, content, sms_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_ims_sms_notification_succeeded(&self, marker: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE ims_sms_receipts
+             SET notification_succeeded = 1
+             WHERE marker = ?1",
+            params![marker],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_ims_sms_acked(&self, marker: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE ims_sms_receipts
+             SET acked = 1, acked_at = CURRENT_TIMESTAMP
+             WHERE marker = ?1",
+            params![marker],
+        )?;
+        Ok(())
     }
 
     pub fn incoming_sms_exists_by_timestamp(

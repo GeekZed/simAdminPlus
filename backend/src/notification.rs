@@ -428,8 +428,10 @@ impl NotificationSender {
             );
         }
 
-        if result.errors.is_empty() || result.delivered {
+        if result.delivered {
             Ok(())
+        } else if result.errors.is_empty() {
+            Err("No notification channel delivered SMS".to_string())
         } else {
             Err(result.errors.join("; "))
         }
