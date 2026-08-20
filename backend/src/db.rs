@@ -2420,6 +2420,41 @@ mod tests {
     }
 
     #[test]
+    fn ims_sms_receipt_survives_sms_deletion_and_matches_replay() {
+        let db = test_db();
+        let phone_number = "+8613800000000";
+        let content = "replayed IMS SMS";
+        let marker = "volte-mt:original";
+        let id = db
+            .insert_sms_at_with_transport(
+                "incoming",
+                phone_number,
+                content,
+                "2026-08-20 12:00:00",
+                "received",
+                Some(marker),
+                "volte_ims",
+            )
+            .unwrap();
+
+        db.record_ims_sms_receipt(marker, phone_number, content, id)
+            .unwrap();
+        db.mark_ims_sms_notification_succeeded(marker).unwrap();
+        db.mark_ims_sms_acked(marker).unwrap();
+        db.delete_sms(id).unwrap();
+
+        assert_eq!(
+            db.get_ims_sms_receipt(marker).unwrap(),
+            Some((true, true, id))
+        );
+        assert_eq!(
+            db.get_recent_ims_sms_receipt(phone_number, content)
+                .unwrap(),
+            Some((true, true, id))
+        );
+    }
+
+    #[test]
     fn own_number_cache_allows_empty_result() {
         let db = test_db();
 
