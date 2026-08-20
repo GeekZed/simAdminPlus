@@ -1,8 +1,0 @@
-[Unit]
-Description=SimAdmin VoLTE P-CSCF recovery check
-After=network.target simadmin.service
-Requires=simadmin.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/simadmin-volte-recovery.sh

@@ -8,8 +8,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
@@ -220,22 +222,74 @@ pub fn parse_qmi_packet_handle(output: &str) -> Option<String> {
     })
 }
 
-pub fn parse_qmi_client_id(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let (label, value) = line.split_once(':')?;
-        if label.trim() == "CID" {
-            let value = value.trim().trim_matches('\'');
-            (!value.is_empty()).then(|| value.to_string())
-        } else {
-            None
-        }
-    })
-}
-
 #[derive(Debug)]
 pub struct QmiPacketSession {
     packet_handle: String,
-    client_id: String,
+    keeper: tokio::process::Child,
+}
+
+fn parse_pdp_contexts(output: &str) -> Vec<(u8, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let start = line.find("+CGDCONT:")?;
+            let fields = line[start + "+CGDCONT:".len()..]
+                .trim()
+                .trim_matches('\'')
+                .split(',')
+                .map(|field| field.trim().trim_matches('"'))
+                .collect::<Vec<_>>();
+            let profile_id = fields.first()?.parse().ok()?;
+            let apn = fields.get(2)?.to_string();
+            Some((profile_id, apn))
+        })
+        .collect()
+}
+
+fn select_ims_profile_id(contexts: &[(u8, String)]) -> Option<u8> {
+    contexts
+        .iter()
+        .find(|(_, apn)| apn.eq_ignore_ascii_case("ims"))
+        .map(|(profile_id, _)| *profile_id)
+        .or_else(|| {
+            (3..=16).find(|candidate| {
+                !contexts
+                    .iter()
+                    .any(|(profile_id, _)| profile_id == candidate)
+            })
+        })
+}
+
+async fn prepare_ims_profile(conn: &Connection) -> Result<u8> {
+    let modem_path = crate::modem_manager::find_modem_path(conn).await?;
+    let contexts = crate::modem_manager::send_at_command(conn, &modem_path, "AT+CGDCONT?")
+        .await
+        .map_err(|error| anyhow!("failed to inspect PDP contexts: {error}"))?;
+    let contexts = parse_pdp_contexts(&contexts);
+    let profile_id = select_ims_profile_id(&contexts)
+        .ok_or_else(|| anyhow!("no free IMS PDP profile is available"))?;
+
+    let profile_exists = contexts
+        .iter()
+        .any(|(existing_id, apn)| *existing_id == profile_id && apn.eq_ignore_ascii_case("ims"));
+
+    if !profile_exists {
+        let define = format!("AT+CGDCONT={profile_id},\"IPV6\",\"ims\"");
+        crate::modem_manager::send_at_command(conn, &modem_path, &define)
+            .await
+            .map_err(|error| anyhow!("failed to configure IMS PDP profile: {error}"))?;
+    }
+    let pcscf = format!("AT$QCPDPIMSCFGE={profile_id},1,1,1");
+    crate::modem_manager::send_at_command(conn, &modem_path, &pcscf)
+        .await
+        .map_err(|error| anyhow!("failed to enable IMS P-CSCF reporting: {error}"))?;
+
+    tracing::info!(profile_id, "IMS IPv6 PDP profile configured");
+    Ok(profile_id)
+}
+
+fn ims_start_network_arg(apn: &str, profile_id: u8) -> String {
+    format!("--wds-start-network=apn={apn},3gpp-profile={profile_id},ip-type=6")
 }
 
 pub fn secondary_netdev(qmi_device: &str) -> String {
@@ -268,67 +322,59 @@ pub fn parse_qmi_connection_status(output: &str) -> Option<bool> {
 pub async fn start_secondary_ims_bearer(
     qmi_device: &str,
     apn: &str,
+    profile_id: u8,
 ) -> Result<(QmiPacketSession, QmiBearerSettings)> {
     if qmi_device.trim().is_empty() || apn.trim().is_empty() {
         return Err(anyhow!("QMI device and IMS APN are required"));
     }
 
-    let family_output = tokio::time::timeout(
-        Duration::from_secs(15),
-        qmicli_with_timeout("15")
-            .kill_on_drop(true)
-            .args([
-                "-d",
-                qmi_device,
-                "--device-open-proxy",
-                "--device-open-qmi",
-                "--device-open-net=net-raw-ip|net-no-qos-header",
-                "--wds-set-ip-family=6",
-            ])
-            .output(),
-    )
+    let start_arg = ims_start_network_arg(apn, profile_id);
+    let mut keeper = Command::new("qmicli")
+        .kill_on_drop(true)
+        .args([
+            "-d",
+            qmi_device,
+            "--device-open-proxy",
+            "--device-open-qmi",
+            "--device-open-net=net-raw-ip|net-no-qos-header",
+            "--client-no-release-cid",
+            &start_arg,
+            "--wds-follow-network",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let stdout = keeper
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("qmicli secondary IMS bearer stdout is unavailable"))?;
+    let mut lines = BufReader::new(stdout).lines();
+    let handle = match tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(line) = lines.next_line().await? {
+            if let Some(handle) = parse_qmi_packet_handle(&line) {
+                return Ok(handle);
+            }
+        }
+        Err(anyhow!("qmicli exited before returning a packet data handle"))
+    })
     .await
-    .map_err(|_| anyhow!("timed out setting secondary IMS IPv6 family"))??;
-    if !family_output.status.success() {
-        return Err(anyhow!(
-            "qmicli failed to set secondary IMS IPv6 family: {}",
-            String::from_utf8_lossy(&family_output.stderr).trim()
-        ));
-    }
-    let start_arg = format!("--wds-start-network=apn={apn},ip-type=6");
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        qmicli_with_timeout("30")
-            .kill_on_drop(true)
-            .args([
-                "-d",
-                qmi_device,
-                "--device-open-proxy",
-                "--device-open-qmi",
-                "--device-open-net=net-raw-ip|net-no-qos-header",
-                "--client-no-release-cid",
-                &start_arg,
-            ])
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow!("timed out starting secondary IMS bearer"))??;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "qmicli failed to start secondary IMS bearer: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let handle = parse_qmi_packet_handle(&stdout)
-        .ok_or_else(|| anyhow!("qmicli did not return a packet data handle"))?;
-    let client_id = parse_qmi_client_id(&stdout)
-        .ok_or_else(|| anyhow!("qmicli did not return the retained WDS client ID"))?;
-    let session = QmiPacketSession {
+    {
+        Ok(Ok(handle)) => handle,
+        Ok(Err(error)) => {
+            let _ = keeper.kill().await;
+            return Err(error);
+        }
+        Err(_) => {
+            let _ = keeper.kill().await;
+            return Err(anyhow!("timed out starting secondary IMS bearer"));
+        }
+    };
+    tokio::spawn(async move {
+        while let Ok(Some(_)) = lines.next_line().await {}
+    });
+    let mut session = QmiPacketSession {
         packet_handle: handle,
-        client_id,
+        keeper,
     };
     let mut last_error = None;
     for _ in 0..5 {
@@ -338,15 +384,14 @@ pub async fn start_secondary_ims_bearer(
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    let _ = stop_secondary_ims_bearer(qmi_device, &session).await;
+    let _ = stop_secondary_ims_bearer(qmi_device, &mut session).await;
     Err(last_error.unwrap_or_else(|| anyhow!("secondary IMS bearer settings unavailable")))
 }
 
 pub async fn read_secondary_bearer_settings(
     qmi_device: &str,
-    session: &QmiPacketSession,
+    _session: &QmiPacketSession,
 ) -> Result<QmiBearerSettings> {
-    let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(15),
         qmicli_with_timeout("15")
@@ -357,8 +402,6 @@ pub async fn read_secondary_bearer_settings(
                 "--device-open-proxy",
                 "--device-open-qmi",
                 "--device-open-net=net-raw-ip|net-no-qos-header",
-                &cid_arg,
-                "--client-no-release-cid",
                 "--wds-get-current-settings",
             ])
             .output(),
@@ -644,9 +687,8 @@ fn log_register_response_metadata(stage: &str, response: &str) {
 
 pub async fn secondary_ims_bearer_connected(
     qmi_device: &str,
-    session: &QmiPacketSession,
+    _session: &QmiPacketSession,
 ) -> Result<bool> {
-    let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(15),
         qmicli_with_timeout("15")
@@ -657,8 +699,6 @@ pub async fn secondary_ims_bearer_connected(
                 "--device-open-proxy",
                 "--device-open-qmi",
                 "--device-open-net=net-raw-ip|net-no-qos-header",
-                &cid_arg,
-                "--client-no-release-cid",
                 "--wds-get-packet-service-status",
             ])
             .output(),
@@ -679,39 +719,16 @@ pub async fn secondary_ims_bearer_connected(
 
 pub async fn stop_secondary_ims_bearer(
     qmi_device: &str,
-    session: &QmiPacketSession,
+    session: &mut QmiPacketSession,
 ) -> Result<()> {
     if qmi_device.trim().is_empty() || session.packet_handle.trim().is_empty() {
         return Err(anyhow!("QMI device and packet handle are required"));
     }
 
-    let stop_arg = format!("--wds-stop-network={}", session.packet_handle);
-    let cid_arg = format!("--client-cid={}", session.client_id);
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        qmicli_with_timeout("30")
-            .kill_on_drop(true)
-            .args([
-                "-d",
-                qmi_device,
-                "--device-open-proxy",
-                "--device-open-qmi",
-                "--device-open-net=net-raw-ip|net-no-qos-header",
-                &cid_arg,
-                &stop_arg,
-            ])
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow!("timed out stopping secondary IMS bearer"))??;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "qmicli failed to stop secondary IMS bearer: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
+    session.keeper.start_kill()?;
+    tokio::time::timeout(Duration::from_secs(5), session.keeper.wait())
+        .await
+        .map_err(|_| anyhow!("timed out stopping secondary IMS bearer"))??;
     Ok(())
 }
 
@@ -738,8 +755,8 @@ pub async fn run_secondary_ims_bearer_supervisor(
             if let Some(network) = active_network.take() {
                 cleanup_secondary_ipv6_interface(&network).await;
             }
-            if let Some((device, handle)) = active.take() {
-                let _ = stop_secondary_ims_bearer(&device, &handle).await;
+            if let Some((device, mut handle)) = active.take() {
+                let _ = stop_secondary_ims_bearer(&device, &mut handle).await;
             }
             let _ = write_runtime_status(&RuntimeStatus {
                 phase: "disabled".to_string(),
@@ -789,13 +806,29 @@ pub async fn run_secondary_ims_bearer_supervisor(
             }
             let netdev = secondary_netdev(&device);
 
+            let profile_id = match prepare_ims_profile(&conn).await {
+                Ok(profile_id) => profile_id,
+                Err(error) => {
+                    tracing::warn!(error = %error, "IMS PDP profile preparation failed");
+                    let _ = write_runtime_status(&RuntimeStatus {
+                        phase: "ims_profile_failed".to_string(),
+                        transport: "native_qmi".to_string(),
+                        interface: netdev.clone(),
+                        last_error: error.to_string(),
+                        ..RuntimeStatus::default()
+                    });
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
             let _ = write_runtime_status(&RuntimeStatus {
                 phase: "starting_ims_bearer".to_string(),
                 transport: "native_qmi".to_string(),
                 interface: netdev.clone(),
                 ..RuntimeStatus::default()
             });
-            match start_secondary_ims_bearer(&device, "ims").await {
+            match start_secondary_ims_bearer(&device, "ims", profile_id).await {
                 Ok((handle, settings)) => {
                     active = Some((device.clone(), handle));
                     let mut pcscf_candidates = Vec::new();
@@ -921,8 +954,8 @@ pub async fn run_secondary_ims_bearer_supervisor(
                         if let Some(network) = active_network.take() {
                             cleanup_secondary_ipv6_interface(&network).await;
                         }
-                        if let Some((active_device, active_handle)) = active.take() {
-                            let _ = stop_secondary_ims_bearer(&active_device, &active_handle).await;
+                        if let Some((active_device, mut active_handle)) = active.take() {
+                            let _ = stop_secondary_ims_bearer(&active_device, &mut active_handle).await;
                         }
                         let _ = write_runtime_status(&RuntimeStatus {
                             phase: "register_failed".to_string(),
@@ -957,8 +990,8 @@ pub async fn run_secondary_ims_bearer_supervisor(
             if let Some(network) = active_network.take() {
                 cleanup_secondary_ipv6_interface(&network).await;
             }
-            if let Some((device, handle)) = active.take() {
-                let _ = stop_secondary_ims_bearer(&device, &handle).await;
+            if let Some((device, mut handle)) = active.take() {
+                let _ = stop_secondary_ims_bearer(&device, &mut handle).await;
             }
             let _ = write_runtime_status(&RuntimeStatus {
                 phase: "ims_session_lost".to_string(),
@@ -989,8 +1022,9 @@ pub async fn run_secondary_ims_bearer_supervisor(
                 if let Some(network) = active_network.take() {
                     cleanup_secondary_ipv6_interface(&network).await;
                 }
-                let _ = stop_secondary_ims_bearer(device, handle).await;
-                active = None;
+                if let Some((device, mut handle)) = active.take() {
+                    let _ = stop_secondary_ims_bearer(&device, &mut handle).await;
+                }
                 let _ = write_runtime_status(&RuntimeStatus {
                     phase: "bearer_disconnected".to_string(),
                     transport: "native_qmi".to_string(),
@@ -1049,9 +1083,30 @@ mod tests {
             super::parse_qmi_packet_handle("Packet data handle: '42'"),
             Some("42".to_string())
         );
+    }
+
+    #[test]
+    fn selects_first_free_ims_pdp_profile() {
+        let contexts = super::parse_pdp_contexts(
+            "+CGDCONT: 1,\"IPV4V6\",\"ctlte\",\"0.0.0.0\"\n+CGDCONT: 2,\"IPV4V6\",\"ctwap\",\"0.0.0.0\"",
+        );
+        assert_eq!(contexts, vec![(1, "ctlte".to_string()), (2, "ctwap".to_string())]);
+        assert_eq!(super::select_ims_profile_id(&contexts), Some(3));
+    }
+
+    #[test]
+    fn reuses_existing_ims_pdp_profile() {
+        let contexts = super::parse_pdp_contexts(
+            "+CGDCONT: 1,\"IPV4V6\",\"ctlte\"\n+CGDCONT: 5,\"IPV6\",\"ims\"",
+        );
+        assert_eq!(super::select_ims_profile_id(&contexts), Some(5));
+    }
+
+    #[test]
+    fn builds_beta9_profile_bound_wds_start_argument() {
         assert_eq!(
-            super::parse_qmi_client_id("Service: 'wds'\nCID: '17'"),
-            Some("17".to_string())
+            super::ims_start_network_arg("ims", 3),
+            "--wds-start-network=apn=ims,3gpp-profile=3,ip-type=6"
         );
     }
 

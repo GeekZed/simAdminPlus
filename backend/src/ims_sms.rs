@@ -587,13 +587,14 @@ pub async fn run_ims_sms_listener(
             continue;
         }
         let timestamp = beijing_sms_now_string();
-        let id = database.insert_sms_at(
+        let id = database.insert_sms_at_with_transport(
             "incoming",
             &incoming.phone_number,
             &incoming.content,
             &timestamp,
             "received",
             Some(&incoming.marker),
+            "volte_ims",
         )?;
         let message = SmsMessage {
             id,

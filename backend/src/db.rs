@@ -385,6 +385,7 @@ impl Database {
                 status TEXT NOT NULL,
                 notification_status TEXT NOT NULL DEFAULT 'pending',
                 pdu TEXT,
+                transport TEXT NOT NULL DEFAULT 'modem',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
             [],
@@ -394,6 +395,14 @@ impl Database {
             conn.execute(
                 "ALTER TABLE sms_messages
                  ADD COLUMN notification_status TEXT NOT NULL DEFAULT 'pending'",
+                [],
+            )?;
+        }
+
+        if !table_has_column(&conn, "sms_messages", "transport")? {
+            conn.execute(
+                "ALTER TABLE sms_messages
+                 ADD COLUMN transport TEXT NOT NULL DEFAULT 'modem'",
                 [],
             )?;
         }
@@ -801,12 +810,42 @@ impl Database {
         status: &str,
         pdu: Option<&str>,
     ) -> Result<i64> {
+        self.insert_sms_at_with_transport(
+            direction,
+            phone_number,
+            content,
+            timestamp,
+            status,
+            pdu,
+            "modem",
+        )
+    }
+
+    pub fn insert_sms_at_with_transport(
+        &self,
+        direction: &str,
+        phone_number: &str,
+        content: &str,
+        timestamp: &str,
+        status: &str,
+        pdu: Option<&str>,
+        transport: &str,
+    ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let timestamp = sms_timestamp_for_storage(timestamp);
         conn.execute(
-            "INSERT INTO sms_messages (direction, phone_number, content, timestamp, status, pdu)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![direction, phone_number, content, timestamp, status, pdu],
+            "INSERT INTO sms_messages
+             (direction, phone_number, content, timestamp, status, pdu, transport)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                direction,
+                phone_number,
+                content,
+                timestamp,
+                status,
+                pdu,
+                transport
+            ],
         )?;
 
         Ok(conn.last_insert_rowid())
@@ -2241,6 +2280,32 @@ mod tests {
 
     fn test_db() -> Database {
         Database::new(PathBuf::from(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn sms_insert_records_explicit_transport() {
+        let db = test_db();
+        let id = db
+            .insert_sms_at_with_transport(
+                "incoming",
+                "+8613800000000",
+                "IMS SMS",
+                "2026-08-20 12:00:00",
+                "received",
+                Some("volte-mt:test"),
+                "volte_ims",
+            )
+            .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let transport: String = conn
+            .query_row(
+                "SELECT transport FROM sms_messages WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(transport, "volte_ims");
     }
 
     #[test]

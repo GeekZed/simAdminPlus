@@ -22,6 +22,7 @@ const OTA_BINARY_PATH: &str = "/opt/simadmin/simadmin";
 const OTA_WWW_PATH: &str = "/opt/simadmin/www";
 const OTA_META_PATH: &str = "/opt/simadmin/meta.json";
 const OTA_SERVICE_NAME: &str = "simadmin.service";
+const OTA_SYSTEM_DIR: &str = "/tmp/ota_staging/system";
 const NM_CONF_PATH: &str = "/etc/NetworkManager/conf.d/99-simadmin-unmanaged-modem.conf";
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/GeekZed/simAdminPlus/releases/latest";
 const CURRENT_TARGET_TRIPLE: &str = env!("APP_TARGET_TRIPLE");
@@ -529,6 +530,13 @@ pub fn handle_ota_upload(data: &[u8]) -> Result<OtaUploadResponse, String> {
 fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
     let binary_path = format!("{}/simadmin", OTA_STAGING_DIR);
     let www_path = format!("{}/www", OTA_STAGING_DIR);
+    let required_system_files = [
+        "simadmin.service",
+        "simadmin-secondary-qmi.service",
+        "simadmin-modem-recovery.service",
+        "simadmin-modem-recovery.sh",
+        "99-simadmin-secondary-qmi.rules",
+    ];
 
     // 检查文件存在
     if !Path::new(&binary_path).exists() {
@@ -550,6 +558,20 @@ fn validate_ota_package(meta: &OtaMeta) -> Result<OtaValidation, String> {
             frontend_md5_match: false,
             arch_match: false,
             error: Some("Frontend directory not found in package".to_string()),
+        });
+    }
+
+    if let Some(missing) = required_system_files
+        .iter()
+        .find(|name| !Path::new(OTA_SYSTEM_DIR).join(name).is_file())
+    {
+        return Ok(OtaValidation {
+            valid: false,
+            is_newer: false,
+            binary_md5_match: false,
+            frontend_md5_match: false,
+            arch_match: false,
+            error: Some(format!("Required system file not found: system/{missing}")),
         });
     }
 
@@ -660,13 +682,14 @@ pub fn apply_ota_update(restart_now: bool) -> Result<String, String> {
     chmod_www_tree(OTA_WWW_PATH)?;
 
     install_meta_file()?;
+    install_system_files()?;
     let nm_result = remove_legacy_networkmanager_modem_unmanaged();
 
     // 清理暂存目录
     let _ = fs::remove_dir_all(OTA_STAGING_DIR);
 
     let message = format!(
-        "Update to version {} applied successfully; {}",
+        "Update to version {} applied successfully; {}; cold boot required for DATA6/VoLTE",
         meta.version, nm_result
     );
 
@@ -691,6 +714,10 @@ fn remove_legacy_networkmanager_modem_unmanaged() -> String {
 }
 
 fn install_binary_atomic(src: &str, dst: &str) -> Result<(), String> {
+    install_file_atomic(src, dst, "755")
+}
+
+fn install_file_atomic(src: &str, dst: &str, mode: &str) -> Result<(), String> {
     let dst_path = Path::new(dst);
     let dst_dir = dst_path
         .parent()
@@ -703,7 +730,7 @@ fn install_binary_atomic(src: &str, dst: &str) -> Result<(), String> {
     fs::copy(src, &tmp_path).map_err(|e| format!("Failed to copy binary: {}", e))?;
 
     let chmod_output = Command::new("chmod")
-        .arg("755")
+        .arg(mode)
         .arg(&tmp_path)
         .output()
         .map_err(|e| {
@@ -724,6 +751,85 @@ fn install_binary_atomic(src: &str, dst: &str) -> Result<(), String> {
         format!("Failed to replace binary: {}", e)
     })?;
 
+    Ok(())
+}
+
+fn run_system_command(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| format!("Failed to run {program}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} {} failed: {}",
+            program,
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn install_system_files() -> Result<(), String> {
+    for (name, destination, mode) in [
+        ("simadmin.service", "/etc/systemd/system/simadmin.service", "644"),
+        (
+            "simadmin-secondary-qmi.service",
+            "/etc/systemd/system/simadmin-secondary-qmi.service",
+            "644",
+        ),
+        (
+            "simadmin-modem-recovery.service",
+            "/etc/systemd/system/simadmin-modem-recovery.service",
+            "644",
+        ),
+        (
+            "simadmin-modem-recovery.sh",
+            "/usr/local/bin/simadmin-modem-recovery.sh",
+            "755",
+        ),
+        (
+            "99-simadmin-secondary-qmi.rules",
+            "/etc/udev/rules.d/99-simadmin-secondary-qmi.rules",
+            "644",
+        ),
+    ] {
+        let source = Path::new(OTA_SYSTEM_DIR).join(name);
+        install_file_atomic(
+            source
+                .to_str()
+                .ok_or_else(|| format!("Invalid staged system path: {name}"))?,
+            destination,
+            mode,
+        )?;
+    }
+
+    let _ = Command::new("systemctl")
+        .args(["disable", "--now", "simadmin-volte-recovery.timer"])
+        .output();
+    for legacy_path in [
+        "/etc/systemd/system/simadmin-volte-recovery.service",
+        "/etc/systemd/system/simadmin-volte-recovery.timer",
+        "/usr/local/bin/simadmin-volte-recovery.sh",
+    ] {
+        if Path::new(legacy_path).exists() {
+            fs::remove_file(legacy_path)
+                .map_err(|error| format!("Failed to remove legacy {legacy_path}: {error}"))?;
+        }
+    }
+
+    run_system_command("systemctl", &["daemon-reload"])?;
+    run_system_command(
+        "systemctl",
+        &[
+            "enable",
+            "simadmin.service",
+            "simadmin-secondary-qmi.service",
+            "simadmin-modem-recovery.service",
+        ],
+    )?;
+    run_system_command("udevadm", &["control", "--reload-rules"])?;
     Ok(())
 }
 

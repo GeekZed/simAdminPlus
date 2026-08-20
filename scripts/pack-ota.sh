@@ -55,6 +55,9 @@ fi
 # 获取 Git commit
 if command -v git &> /dev/null && [ -d ".git" ]; then
     COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        COMMIT="${COMMIT}-dirty"
+    fi
 else
     COMMIT="unknown"
 fi
@@ -108,6 +111,16 @@ echo "📋 复制前端文件..."
 mkdir -p "$OTA_TMP/www"
 cp -r "$FRONTEND_DIR"/* "$OTA_TMP/www/"
 
+# 复制冷启动所需的 systemd、udev 与恢复脚本
+echo "📋 复制系统集成文件..."
+mkdir -p "$OTA_TMP/system"
+cp scripts/simadmin.service "$OTA_TMP/system/"
+cp scripts/simadmin-secondary-qmi.service "$OTA_TMP/system/"
+cp scripts/simadmin-modem-recovery.service "$OTA_TMP/system/"
+cp scripts/simadmin-modem-recovery.sh "$OTA_TMP/system/"
+cp scripts/99-simadmin-secondary-qmi.rules "$OTA_TMP/system/"
+chmod 755 "$OTA_TMP/system/simadmin-modem-recovery.sh"
+
 # 计算前端 MD5（所有文件的 hash，与 Rust 验证逻辑一致）
 # 方式：每个文件的 MD5 排序后，用换行符连接，再计算整体 MD5
 echo "📋 计算前端 MD5..."
@@ -151,7 +164,7 @@ mkdir -p release
 OTA_FILE="release/simadmin_${VERSION}_${TARGET}.tar.gz"
 echo "📦 打包 OTA 更新包..."
 cd "$OTA_TMP"
-tar -czf - meta.json simadmin www > "$OLDPWD/$OTA_FILE"
+tar -czf - meta.json simadmin www system > "$OLDPWD/$OTA_FILE"
 cd "$OLDPWD"
 
 # 显示结果
