@@ -21,6 +21,12 @@ use zbus::Connection;
 
 pub const RUNTIME_STATUS_PATH: &str = "/run/simadmin/volte-status.json";
 
+fn qmicli_with_timeout(seconds: &str) -> Command {
+    let mut command = Command::new("timeout");
+    command.args(["-k", "2", seconds, "qmicli"]);
+    command
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeStatus {
     #[serde(default)]
@@ -269,7 +275,7 @@ pub async fn start_secondary_ims_bearer(
 
     let family_output = tokio::time::timeout(
         Duration::from_secs(15),
-        Command::new("qmicli")
+        qmicli_with_timeout("15")
             .kill_on_drop(true)
             .args([
                 "-d",
@@ -292,7 +298,7 @@ pub async fn start_secondary_ims_bearer(
     let start_arg = format!("--wds-start-network=apn={apn},ip-type=6");
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        Command::new("qmicli")
+        qmicli_with_timeout("30")
             .kill_on_drop(true)
             .args([
                 "-d",
@@ -343,7 +349,7 @@ pub async fn read_secondary_bearer_settings(
     let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(15),
-        Command::new("qmicli")
+        qmicli_with_timeout("15")
             .kill_on_drop(true)
             .args([
                 "-d",
@@ -643,7 +649,7 @@ pub async fn secondary_ims_bearer_connected(
     let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(15),
-        Command::new("qmicli")
+        qmicli_with_timeout("15")
             .kill_on_drop(true)
             .args([
                 "-d",
@@ -683,7 +689,7 @@ pub async fn stop_secondary_ims_bearer(
     let cid_arg = format!("--client-cid={}", session.client_id);
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        Command::new("qmicli")
+        qmicli_with_timeout("30")
             .kill_on_drop(true)
             .args([
                 "-d",
