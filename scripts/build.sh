@@ -146,6 +146,12 @@ if [ -f "backend/Cargo.toml" ]; then
     run_sed_in_place "backend/Cargo.toml" "s/^version = \"[^\"]*\"/version = \"$VERSION\"/"
 fi
 
+# 同步 Cargo.lock 中根包版本，确保 --locked 构建与 VERSION 一致
+if [ -f "backend/Cargo.lock" ]; then
+    require_cmd perl "请安装 perl，用于同步 Cargo.lock 中的项目版本。"
+    VERSION="$VERSION" perl -0pi -e 's/(name = "simadmin"\nversion = ")[^"]+/$1$ENV{VERSION}/' backend/Cargo.lock
+fi
+
 echo ""
 
 # ==================== 构建前端 ====================
