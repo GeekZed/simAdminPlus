@@ -179,13 +179,21 @@ fn parse_udh(data: &[u8]) -> Option<(Option<ConcatInfo>, usize)> {
     Some((None, header_length + 1))
 }
 
-fn decode_sms_deliver(tpdu: &[u8]) -> Result<(String, String, Option<ConcatInfo>)> {
+fn decode_sms_deliver(tpdu: &[u8]) -> Result<(String, String, Option<ConcatInfo>, String)> {
     if tpdu.len() < 2 || tpdu[0] & 0x03 != 0x00 {
         return Err(anyhow!("IMS TPDU is not SMS-DELIVER"));
     }
     let address_digits = tpdu[1] as usize;
     let (phone_number, address_len) = decode_address(&tpdu[2..], address_digits)?;
-    let mut index = 2 + address_len + 2 + 7;
+    let timestamp_start = 2 + address_len + 2;
+    let timestamp_end = timestamp_start + 7;
+    let timestamp_key = tpdu
+        .get(timestamp_start..timestamp_end)
+        .ok_or_else(|| anyhow!("IMS SMS-DELIVER timestamp is missing"))?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut index = timestamp_end;
     if tpdu.len() <= index {
         return Err(anyhow!("IMS SMS-DELIVER user data is missing"));
     }
@@ -213,7 +221,7 @@ fn decode_sms_deliver(tpdu: &[u8]) -> Result<(String, String, Option<ConcatInfo>
                 .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
                 .collect::<Vec<_>>(),
         )?;
-        return Ok((phone_number, content, concat));
+        return Ok((phone_number, content, concat, timestamp_key));
     } else if dcs & 0x0c == 0x00 {
         let (concat, header_bytes) = if tpdu[0] & 0x40 != 0 {
             parse_udh(data).unwrap_or((None, 0))
@@ -229,11 +237,29 @@ fn decode_sms_deliver(tpdu: &[u8]) -> Result<(String, String, Option<ConcatInfo>
             length - header_septets,
             header_septets * 7 - header_bytes * 8,
         );
-        return Ok((phone_number, content, concat));
+        return Ok((phone_number, content, concat, timestamp_key));
     } else {
         String::from_utf8_lossy(&data[..length.min(data.len())]).into_owned()
     };
-    Ok((phone_number, content, None))
+    Ok((phone_number, content, None, timestamp_key))
+}
+
+fn stable_ims_marker(
+    phone_number: &str,
+    content: &str,
+    timestamp_key: &str,
+    concat: Option<&ConcatInfo>,
+) -> String {
+    let concat_key = concat
+        .map(|value| {
+            format!(
+                "{}:{}:{}",
+                value.reference, value.total, value.sequence
+            )
+        })
+        .unwrap_or_default();
+    let identity = format!("{phone_number}\n{timestamp_key}\n{concat_key}\n{content}");
+    format!("volte-mt:{:x}", md5::compute(identity.as_bytes()))
 }
 
 pub fn decode_ims_sms(body_hex: &str) -> Result<IncomingImsSms> {
@@ -244,7 +270,8 @@ pub fn decode_ims_sms(body_hex: &str) -> Result<IncomingImsSms> {
     let mut index = 2;
     let originator_length = rp_data[index] as usize;
     index += 1 + originator_length;
-    let decode_at = |length_index: usize| -> Result<(String, String, Option<ConcatInfo>)> {
+    let decode_at =
+        |length_index: usize| -> Result<(String, String, Option<ConcatInfo>, String)> {
         let user_data_length = *rp_data
             .get(length_index)
             .ok_or_else(|| anyhow!("IMS RP-DATA user data is missing"))? as usize;
@@ -253,14 +280,19 @@ pub fn decode_ims_sms(body_hex: &str) -> Result<IncomingImsSms> {
             return Err(anyhow!("IMS RP-DATA user data is truncated"));
         }
         decode_sms_deliver(&rp_data[user_data_index..user_data_index + user_data_length])
-    };
-    let (phone_number, content, concat) = decode_at(index).or_else(|_| {
+        };
+    let (phone_number, content, concat, timestamp_key) = decode_at(index).or_else(|_| {
         let destination_length = *rp_data
             .get(index)
             .ok_or_else(|| anyhow!("IMS RP-DATA destination is missing"))? as usize;
         decode_at(index + 1 + destination_length)
     })?;
-    let marker = format!("volte-mt:{:x}", md5::compute(body_hex.as_bytes()));
+    let marker = stable_ims_marker(
+        &phone_number,
+        &content,
+        &timestamp_key,
+        concat.as_ref(),
+    );
     Ok(IncomingImsSms {
         phone_number,
         content,
@@ -621,6 +653,14 @@ mod tests {
         assert_eq!(sms.phone_number, "+12345678901");
         assert_eq!(sms.content, "你好");
         assert!(sms.marker.starts_with("volte-mt:"));
+    }
+
+    #[test]
+    fn keeps_same_marker_when_ims_transaction_reference_changes() {
+        let tpdu = "040B912143658709F1000832122310123400044F60597D";
+        let first = decode_ims_sms(&format!("010000{:02X}{}", tpdu.len() / 2, tpdu)).unwrap();
+        let replay = decode_ims_sms(&format!("010100{:02X}{}", tpdu.len() / 2, tpdu)).unwrap();
+        assert_eq!(first.marker, replay.marker);
     }
 
     #[test]
