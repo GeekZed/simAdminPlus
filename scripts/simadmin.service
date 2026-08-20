@@ -1,6 +1,7 @@
 [Unit]
 Description=SimAdmin Backend Service
-After=network.target ModemManager.service
+After=network.target simadmin-secondary-qmi.service ModemManager.service
+Requires=simadmin-secondary-qmi.service
 Wants=ModemManager.service
 
 [Service]

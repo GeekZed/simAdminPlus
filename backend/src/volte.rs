@@ -763,6 +763,24 @@ pub async fn run_secondary_ims_bearer_supervisor(
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             };
+            // The secondary QMI device can appear before ModemManager has
+            // finished bringing up the primary modem after a cold boot.
+            // Starting an IMS bearer during that window leaves the QMI WDS
+            // transaction stuck in `get-current-settings`.
+            match crate::modem_manager::get_data_connection_status(&conn).await {
+                Ok(true) => {}
+                Ok(false) | Err(_) => {
+                    let _ = write_runtime_status(&RuntimeStatus {
+                        phase: "waiting_for_modem".to_string(),
+                        transport: "native_qmi".to_string(),
+                        interface: secondary_netdev(&device),
+                        last_error: "primary modem data connection is not ready".to_string(),
+                        ..RuntimeStatus::default()
+                    });
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
             let netdev = secondary_netdev(&device);
 
             let _ = write_runtime_status(&RuntimeStatus {

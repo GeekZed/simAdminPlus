@@ -36,16 +36,16 @@ export function QuickControls({
     ? '已关闭'
     : volte.runtime.registered
       ? `已注册${volteTransport ? ` · ${volteTransport}` : ''}`
-      : volte.runtime.phase === 'degraded'
+      : /failed|waiting|disconnected|interface_failed/i.test(volte.runtime.phase)
         ? '异常'
         : '启动中'
   const volteColor = !volte?.enabled
     ? 'default'
     : volte.runtime.registered
       ? 'success'
-      : volte.runtime.phase === 'degraded'
-        ? 'error'
-        : 'warning'
+    : /failed|waiting|disconnected|interface_failed/i.test(volte.runtime.phase)
+      ? 'error'
+      : 'warning'
 
   return (
     <Card sx={{ height: '100%' }}>
@@ -79,7 +79,7 @@ export function QuickControls({
             <Box display="flex" alignItems="center" gap={1}>
               <PhoneInTalk color={volte?.runtime.registered ? 'success' : 'disabled'} />
               <Typography variant="body2">VoLTE</Typography>
-              <Chip label={volteLabel} size="small" color={volteColor} sx={{ height: 18, fontSize: '0.65rem' }} />
+              <Chip label={volteLabel} title={volte?.runtime.last_error || volte?.runtime.phase} size="small" color={volteColor} sx={{ height: 18, fontSize: '0.65rem' }} />
             </Box>
             <Switch
               checked={volte?.enabled || false}
