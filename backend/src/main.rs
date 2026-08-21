@@ -865,6 +865,10 @@ async fn main() -> Result<()> {
             post(system_reboot).options(options_handler),
         )
         .route(
+            "/api/system/shutdown",
+            post(system_shutdown).options(options_handler),
+        )
+        .route(
             "/api/service/restart",
             post(restart_service_handler).options(options_handler),
         )

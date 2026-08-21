@@ -535,6 +535,13 @@ class SimAdminCurrentAPI {
     })
   }
 
+  async shutdownSystem(delaySeconds = 1) {
+    return request<ApiResponse<{ delay_seconds: number }>>('/system/shutdown', {
+      method: 'POST',
+      body: JSON.stringify({ delay_seconds: delaySeconds }),
+    })
+  }
+
   async getRoamingStatus() {
     return request<ApiResponse<RoamingResponse>>('/roaming')
   }

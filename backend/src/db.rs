@@ -888,50 +888,14 @@ impl Database {
         Ok(count > 0)
     }
 
-    pub fn get_ims_sms_receipt(&self, marker: &str) -> Result<Option<(bool, bool, i64)>> {
+    pub fn ims_sms_receipt_exists(&self, marker: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT notification_succeeded, acked, sms_id
-             FROM ims_sms_receipts
-             WHERE marker = ?1",
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ims_sms_receipts WHERE marker = ?1",
             params![marker],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)? != 0,
-                    row.get::<_, i64>(1)? != 0,
-                    row.get::<_, Option<i64>>(2)?.unwrap_or_default(),
-                ))
-            },
-        )
-        .optional()
-        .map_err(Into::into)
-    }
-
-    pub fn get_recent_ims_sms_receipt(
-        &self,
-        phone_number: &str,
-        content: &str,
-    ) -> Result<Option<(bool, bool, i64)>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT notification_succeeded, acked, COALESCE(sms_id, 0)
-             FROM ims_sms_receipts
-             WHERE phone_number = ?1
-               AND content = ?2
-               AND created_at >= datetime('now', '-24 hours')
-             ORDER BY created_at DESC
-             LIMIT 1",
-            params![phone_number, content],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)? != 0,
-                    row.get::<_, i64>(1)? != 0,
-                    row.get(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(Into::into)
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn record_ims_sms_receipt(
@@ -947,28 +911,6 @@ impl Database {
              (marker, phone_number, content, sms_id)
              VALUES (?1, ?2, ?3, ?4)",
             params![marker, phone_number, content, sms_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn mark_ims_sms_notification_succeeded(&self, marker: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE ims_sms_receipts
-             SET notification_succeeded = 1
-             WHERE marker = ?1",
-            params![marker],
-        )?;
-        Ok(())
-    }
-
-    pub fn mark_ims_sms_acked(&self, marker: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE ims_sms_receipts
-             SET acked = 1, acked_at = CURRENT_TIMESTAMP
-             WHERE marker = ?1",
-            params![marker],
         )?;
         Ok(())
     }
@@ -2439,19 +2381,12 @@ mod tests {
 
         db.record_ims_sms_receipt(marker, phone_number, content, id)
             .unwrap();
-        db.mark_ims_sms_notification_succeeded(marker).unwrap();
-        db.mark_ims_sms_acked(marker).unwrap();
         db.delete_sms(id).unwrap();
 
-        assert_eq!(
-            db.get_ims_sms_receipt(marker).unwrap(),
-            Some((true, true, id))
-        );
-        assert_eq!(
-            db.get_recent_ims_sms_receipt(phone_number, content)
-                .unwrap(),
-            Some((true, true, id))
-        );
+        assert!(db.ims_sms_receipt_exists(marker).unwrap());
+        assert!(!db
+            .ims_sms_receipt_exists("volte-mt:different-delivery")
+            .unwrap());
     }
 
     #[test]

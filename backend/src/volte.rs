@@ -305,20 +305,6 @@ pub fn secondary_netdev(qmi_device: &str) -> String {
     }
 }
 
-pub fn parse_qmi_connection_status(output: &str) -> Option<bool> {
-    output.lines().find_map(|line| {
-        let (label, value) = line.split_once(':')?;
-        if label.trim() != "Connection status" {
-            return None;
-        }
-        match value.trim().trim_matches('\'') {
-            "connected" => Some(true),
-            "disconnected" => Some(false),
-            _ => None,
-        }
-    })
-}
-
 pub async fn start_secondary_ims_bearer(
     qmi_device: &str,
     apn: &str,
@@ -685,38 +671,6 @@ fn log_register_response_metadata(stage: &str, response: &str) {
     );
 }
 
-pub async fn secondary_ims_bearer_connected(
-    qmi_device: &str,
-    _session: &QmiPacketSession,
-) -> Result<bool> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(15),
-        qmicli_with_timeout("15")
-            .kill_on_drop(true)
-            .args([
-                "-d",
-                qmi_device,
-                "--device-open-proxy",
-                "--device-open-qmi",
-                "--device-open-net=net-raw-ip|net-no-qos-header",
-                "--wds-get-packet-service-status",
-            ])
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow!("timed out reading secondary IMS bearer status"))??;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "qmicli failed to read secondary IMS bearer status: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    parse_qmi_connection_status(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| anyhow!("secondary IMS bearer status was not recognized"))
-}
-
 pub async fn stop_secondary_ims_bearer(
     qmi_device: &str,
     session: &mut QmiPacketSession,
@@ -725,10 +679,12 @@ pub async fn stop_secondary_ims_bearer(
         return Err(anyhow!("QMI device and packet handle are required"));
     }
 
-    session.keeper.start_kill()?;
-    tokio::time::timeout(Duration::from_secs(5), session.keeper.wait())
-        .await
-        .map_err(|_| anyhow!("timed out stopping secondary IMS bearer"))??;
+    if session.keeper.try_wait()?.is_none() {
+        session.keeper.start_kill()?;
+        tokio::time::timeout(Duration::from_secs(5), session.keeper.wait())
+            .await
+            .map_err(|_| anyhow!("timed out stopping secondary IMS bearer"))??;
+    }
     Ok(())
 }
 
@@ -1003,16 +959,20 @@ pub async fn run_secondary_ims_bearer_supervisor(
             continue;
         }
 
-        let (device, handle) = active.as_ref().expect("active bearer exists");
-        match secondary_ims_bearer_connected(device, handle).await {
-            Ok(true) => {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
+        let keeper_result = active
+            .as_mut()
+            .expect("active bearer exists")
+            .1
+            .keeper
+            .try_wait();
+        match keeper_result {
+            Ok(None) => tokio::time::sleep(Duration::from_secs(30)).await,
             Err(error) => {
-                tracing::warn!(error = %error, "secondary IMS bearer status was inconclusive; retaining registered session");
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                tracing::warn!(error = %error, "secondary IMS bearer keeper could not be inspected; retaining registered session");
+                tokio::time::sleep(Duration::from_secs(30)).await;
             }
-            Ok(false) => {
+            Ok(Some(status)) => {
+                tracing::warn!(?status, "secondary IMS bearer keeper exited; reconnecting");
                 if let Some(listener) = sms_listener.take() {
                     listener.abort();
                 }
@@ -1115,15 +1075,4 @@ mod tests {
         assert_eq!(super::secondary_netdev("/dev/wwan0at2"), "wwan1");
     }
 
-    #[test]
-    fn parses_qmi_connection_status() {
-        assert_eq!(
-            super::parse_qmi_connection_status("Connection status: 'connected'"),
-            Some(true)
-        );
-        assert_eq!(
-            super::parse_qmi_connection_status("Connection status: 'disconnected'"),
-            Some(false)
-        );
-    }
 }

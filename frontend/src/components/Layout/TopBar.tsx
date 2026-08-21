@@ -28,6 +28,7 @@ import {
   Menu as MenuIcon,
   MoreVert as MoreVertIcon,
   Refresh as RefreshIcon,
+  RestartAlt as RestartAltIcon,
   Router as RouterIcon,
   Speed as SpeedIcon,
 } from '@mui/icons-material'
@@ -38,7 +39,7 @@ import type { BasebandRestartResponse, BasebandRestartStep } from '../../api/typ
 
 const TOPBAR_TRANSITION = '300ms cubic-bezier(0.4, 0, 0.2, 1)'
 
-type RestartConfirmTarget = 'baseband' | 'service' | 'device'
+type RestartConfirmTarget = 'baseband' | 'service' | 'device' | 'shutdown'
 
 interface TopBarProps {
   drawerWidth: number
@@ -55,7 +56,7 @@ function ServiceRestartIcon() {
   )
 }
 
-function DeviceRebootIcon() {
+function DevicePowerIcon() {
   return (
     <SvgIcon viewBox="0 0 1024 1024" sx={{ fontSize: 18 }}>
       <path d="M561.312102 68.191078l-98.624205 0 0 493.121024 98.624205 0L561.312102 68.191078zM799.735283 174.951591l-69.77618 69.77618c77.420277 63.36619 127.225613 159.27761 127.225613 267.271206 0 190.590779-154.592914 345.184717-345.184717 345.184717S166.815283 702.590779 166.815283 512c0-107.993596 49.805336-203.905016 127.225613-267.271206l-69.77618-69.77618C129.0911 256.316713 68.191078 376.884696 68.191078 512c0 245.080811 198.72811 443.808922 443.808922 443.808922s443.808922-198.72811 443.808922-443.808922C955.808922 376.884696 894.907876 256.316713 799.735283 174.951591z" fill="#d81e06" />
@@ -77,7 +78,7 @@ export default function TopBar({
   const [basebandProgressOpen, setBasebandProgressOpen] = useState(false)
   const [basebandSteps, setBasebandSteps] = useState<BasebandRestartStep[]>([])
   const [basebandCurrentRegistration, setBasebandCurrentRegistration] = useState<string | null>(null)
-  const [systemActionLoading, setSystemActionLoading] = useState<'service' | 'device' | null>(null)
+  const [systemActionLoading, setSystemActionLoading] = useState<'service' | 'device' | 'shutdown' | null>(null)
   const [systemActionMessage, setSystemActionMessage] = useState<string | null>(null)
   const [systemActionSeverity, setSystemActionSeverity] = useState<'info' | 'success' | 'error'>('info')
   const [deviceRebootProgressOpen, setDeviceRebootProgressOpen] = useState(false)
@@ -212,17 +213,37 @@ export default function TopBar({
     }
   }
 
+  const handleShutdownDevice = async () => {
+    if (systemActionLoading) return
+    setSystemActionLoading('shutdown')
+    setSystemActionSeverity('info')
+    setSystemActionMessage('正在提交关机请求')
+    try {
+      await api.shutdownSystem(1)
+      setSystemActionSeverity('success')
+      setSystemActionMessage('设备将在 1 秒后关机')
+    } catch (err) {
+      setSystemActionSeverity('error')
+      setSystemActionMessage(err instanceof Error ? err.message : '关机失败')
+      setSystemActionLoading(null)
+    }
+  }
+
   const restartConfirmTitle = restartConfirmTarget === 'baseband'
     ? '确认重启基带'
     : restartConfirmTarget === 'service'
       ? '确认重启服务'
-      : '确认重启设备'
+      : restartConfirmTarget === 'device'
+        ? '确认重启设备'
+        : '确认关机'
 
   const restartConfirmContent = restartConfirmTarget === 'baseband'
     ? '确定要重启基带吗？重启期间网络注册和数据连接可能会短暂中断。'
     : restartConfirmTarget === 'service'
       ? '确定要重启 SimAdmin 服务吗？重启期间页面可能会短暂不可用。'
-      : '确定要重启设备吗？设备会离线并中断当前连接，请确认后再继续。'
+      : restartConfirmTarget === 'device'
+        ? '确定要重启设备吗？设备会离线并中断当前连接，请确认后再继续。'
+        : '确定要关机吗？设备将立即离线，需手动重新上电。'
 
   const handleConfirmRestart = () => {
     const target = restartConfirmTarget
@@ -233,8 +254,10 @@ export default function TopBar({
       void handleRestartBaseband()
     } else if (target === 'service') {
       void handleRestartService()
-    } else {
+    } else if (target === 'device') {
       void handleRebootDevice()
+    } else {
+      void handleShutdownDevice()
     }
   }
 
@@ -314,7 +337,14 @@ export default function TopBar({
           <Tooltip title="重启设备">
             <span>
               <IconButton size="small" color="default" onClick={() => setRestartConfirmTarget('device')} disabled={basebandRestarting || systemActionLoading !== null} sx={{ p: 0.75 }}>
-                {systemActionLoading === 'device' ? <CircularProgress size={18} color="inherit" /> : <DeviceRebootIcon />}
+                {systemActionLoading === 'device' ? <CircularProgress size={18} color="inherit" /> : <RestartAltIcon sx={{ fontSize: 22 }} />}
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title="关机设备">
+            <span>
+              <IconButton size="small" color="default" onClick={() => setRestartConfirmTarget('shutdown')} disabled={basebandRestarting || systemActionLoading !== null} sx={{ p: 0.75 }}>
+                {systemActionLoading === 'shutdown' ? <CircularProgress size={18} color="inherit" /> : <DevicePowerIcon />}
               </IconButton>
             </span>
           </Tooltip>

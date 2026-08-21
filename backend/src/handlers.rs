@@ -3786,6 +3786,39 @@ pub async fn system_reboot(
     )
 }
 
+/// POST /api/system/shutdown
+pub async fn system_shutdown(
+    State(app): State<AppState>,
+    Json(payload): Json<SystemRebootRequest>,
+) -> impl IntoResponse {
+    let delay = payload.delay_seconds;
+    app.system_event_emitter
+        .emit_code(
+            system_event_codes::SYSTEM_SERVICE_REBOOT_REQUESTED,
+            system_event_severity::WARNING,
+            system_event_status::TRIGGERED,
+            "system",
+            format!("用户触发系统关机，延迟 {} 秒执行", delay),
+        )
+        .await;
+    tokio::spawn(async move {
+        if delay > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
+        }
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["poweroff", "--no-wall"])
+            .status()
+            .await;
+    });
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            format!("System will power off in {} seconds", delay),
+            json!({ "delay_seconds": delay }),
+        )),
+    )
+}
+
 pub async fn run_safe_os_reboot_sequence(
     delay_seconds: u32,
     system_events: Arc<crate::system_event::SystemEventEmitter>,
