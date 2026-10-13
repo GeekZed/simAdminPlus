@@ -1,0 +1,16 @@
+[Unit]
+Description=SimAdmin DATA6 stock RPMSG QMI initializer
+After=systemd-udevd.service systemd-modules-load.service
+Before=ModemManager.service simadmin.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+ExecCondition=/bin/sh -c 'modprobe rpmsg_wwan_ctrl >/dev/null 2>&1 || true; i=0; while test "$i" -lt 20; do if test -e /sys/bus/rpmsg/drivers/rpmsg_wwan_ctrl/bind; then for d in /sys/bus/rpmsg/devices/*; do test -e "$d/driver_override" && test "$(cat "$d/name" 2>/dev/null)" = DATA6_CNTL && exit 0; done; fi; i=$((i + 1)); sleep 1; done; exit 1'
+ExecStart=/opt/simadmin/simadmin secondary-qmi-init
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=75
+
+[Install]
+WantedBy=multi-user.target

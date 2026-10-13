@@ -1,0 +1,1 @@
+SUBSYSTEM=="wwan", KERNEL=="wwan0qmi1", ENV{ID_MM_PORT_IGNORE}="1"

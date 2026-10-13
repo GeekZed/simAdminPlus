@@ -16,6 +16,7 @@ import {
 import {
   Dashboard as DashboardIcon,
   SignalCellularAlt as SignalIcon,
+  PhoneInTalk as VolteIcon,
   Settings as SettingsIcon,
   Sms as SmsIcon,
   NotificationsActive as NotificationsIcon,
@@ -70,6 +71,7 @@ const menuGroups: MenuConfigItem[] = [
     label: '网络',
     items: [
       { path: '/network', label: '蜂窝网络', icon: SignalIcon },
+      { path: '/volte', label: 'VoLTE 诊断', icon: VolteIcon },
       { path: '/device-network', label: '设备网络', icon: RouterIcon },
     ],
   },

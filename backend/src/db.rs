@@ -414,6 +414,7 @@ impl Database {
                 status TEXT NOT NULL,
                 notification_status TEXT NOT NULL DEFAULT 'pending',
                 pdu TEXT,
+                transport TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
             [],
@@ -432,6 +433,23 @@ impl Database {
                 [],
             )?;
         }
+        // IMS 短信走 SIP 通道而非 ModemManager，需要记录传输通道以便区分与去重
+        if !table_has_column(&conn, "sms_messages", "transport")? {
+            conn.execute("ALTER TABLE sms_messages ADD COLUMN transport TEXT", [])?;
+        }
+
+        // IMS 短信回执去重表：以 marker 唯一标识一条已确认的 IMS 短信，
+        // 防止同一回执在重连/重试中被重复落库并重复转发。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ims_sms_receipts (
+                marker TEXT PRIMARY KEY,
+                phone_number TEXT NOT NULL,
+                content TEXT NOT NULL,
+                sms_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
 
         // 创建短信索引
         conn.execute(
@@ -871,6 +889,69 @@ impl Database {
         )?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    /// 写入短信并显式记录传输通道。
+    ///
+    /// IMS 短信经 SIP 通道投递，与 ModemManager 上报的普通短信在来源上不可混同，
+    /// 因此单独保留 `transport` 以便前端区分、展示与去重。
+    pub fn insert_sms_at_with_transport(
+        &self,
+        direction: &str,
+        phone_number: &str,
+        content: &str,
+        timestamp: &str,
+        status: &str,
+        pdu: Option<&str>,
+        transport: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let timestamp = sms_timestamp_for_storage(timestamp);
+        conn.execute(
+            "INSERT INTO sms_messages
+             (direction, phone_number, content, timestamp, status, pdu, transport)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                direction,
+                phone_number,
+                content,
+                timestamp,
+                status,
+                pdu,
+                transport
+            ],
+        )?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 检查某条 IMS 短信是否已落库，避免重连重试导致重复转发。
+    pub fn ims_sms_receipt_exists(&self, marker: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ims_sms_receipts WHERE marker = ?1",
+            params![marker],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// 记录已确认的 IMS 短信，marker 为主键，天然幂等。
+    pub fn record_ims_sms_receipt(
+        &self,
+        marker: &str,
+        phone_number: &str,
+        content: &str,
+        sms_id: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO ims_sms_receipts
+             (marker, phone_number, content, sms_id)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![marker, phone_number, content, sms_id],
+        )?;
+        Ok(())
     }
 
     /// Check whether an SMS marker has already been stored.

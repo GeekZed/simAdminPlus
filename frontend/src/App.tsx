@@ -24,6 +24,7 @@ const BackupRestore = lazy(() => import('./pages/BackupRestore'))
 const OtaUpdate = lazy(() => import('./pages/OtaUpdate'))
 const Login = lazy(() => import('./pages/Login'))
 const AutomationCenter = lazy(() => import('./pages/AutomationCenter'))
+const VolteDiagnostics = lazy(() => import('./pages/VolteDiagnostics'))
 
 // 页面加载中的 fallback
 function PageLoading() {
@@ -143,6 +144,7 @@ function App() {
                 <Route path="sms" element={<Suspense fallback={<PageLoading />}><SMS /></Suspense>} />
                 <Route path="notifications" element={<Suspense fallback={<PageLoading />}><NotificationCenter /></Suspense>} />
                 <Route path="automation" element={<Suspense fallback={<PageLoading />}><AutomationCenter /></Suspense>} />
+                <Route path="volte" element={<Suspense fallback={<PageLoading />}><VolteDiagnostics /></Suspense>} />
                 <Route path="phone" element={<Suspense fallback={<PageLoading />}><Phone /></Suspense>} />
                 <Route path="config" element={<Suspense fallback={<PageLoading />}><Configuration /></Suspense>} />
                 <Route path="config/security" element={<Suspense fallback={<PageLoading />}><Configuration /></Suspense>} />

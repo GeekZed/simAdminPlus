@@ -706,6 +706,117 @@ pub struct ImsStatusResponse {
     pub registered: bool,
     pub voice_capable: bool,
     pub sms_capable: bool,
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub interface: String,
+    #[serde(default)]
+    pub last_error: String,
+}
+
+/// 前端 `VolteConfig` 契约（contracts.ts VolteConfig）
+#[derive(Debug, Serialize, Default, Clone)]
+pub struct VolteConfigView {
+    pub feature_enabled: bool,
+    pub connection_enabled: bool,
+    pub sms_enabled: bool,
+}
+
+/// 前端 `VolteRuntimeStatus` 契约（contracts.ts VolteRuntimeStatus）。
+///
+/// 后端运行时的 `volte::RuntimeStatus` 只持久化 6 个核心字段，而诊断页面需要
+/// 更细粒度的可观测项。此处作为边界视图：以可映射的真实字段为准，其余显式
+/// 置为 `null` 而非伪造默认值，避免页面上出现看似有效实则杜撰的诊断结论。
+#[derive(Debug, Serialize, Default)]
+pub struct VolteRuntimeView {
+    pub phase: String,
+    pub stage: Option<String>,
+    pub enabled: bool,
+    pub registered: bool,
+    pub registration_mode: Option<String>,
+    pub interface: Option<String>,
+    pub family: Option<String>,
+    pub local_ip: Option<String>,
+    pub pcscf: Option<String>,
+    pub session_started_at: Option<String>,
+    pub registered_at: Option<String>,
+    pub last_rx_at: Option<String>,
+    pub last_tx_at: Option<String>,
+    pub last_error: Option<String>,
+    pub last_failure_at: Option<String>,
+    pub next_retry_at: Option<String>,
+    pub retry_after_secs: Option<u64>,
+    pub registration_degraded_reason: Option<String>,
+    pub sent_count: u64,
+    pub received_count: u64,
+    pub duplicate_count: u64,
+    pub failure_count: u64,
+    pub reconnect_count: u64,
+    pub data_path_mode: Option<String>,
+    pub data_path_degraded_reason: Option<String>,
+}
+
+impl From<crate::volte::RuntimeStatus> for VolteRuntimeView {
+    fn from(s: crate::volte::RuntimeStatus) -> Self {
+        let opt = |v: String| if v.trim().is_empty() { None } else { Some(v) };
+        let enabled = s.phase != "idle";
+        Self {
+            phase: s.phase,
+            stage: None,
+            enabled,
+            registered: s.registered,
+            registration_mode: opt(s.transport.clone()),
+            interface: opt(s.interface),
+            // 运行时尚未持久化地址族/地址/P-CSCF，明确置空而非猜测
+            family: None,
+            local_ip: None,
+            pcscf: None,
+            session_started_at: None,
+            registered_at: None,
+            last_rx_at: None,
+            last_tx_at: None,
+            last_error: opt(s.last_error),
+            last_failure_at: None,
+            next_retry_at: None,
+            retry_after_secs: None,
+            registration_degraded_reason: None,
+            sent_count: 0,
+            received_count: 0,
+            duplicate_count: 0,
+            failure_count: 0,
+            reconnect_count: 0,
+            data_path_mode: opt(s.transport),
+            data_path_degraded_reason: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Default)]
+pub struct VolteControlResponse {
+    pub config: VolteConfigView,
+    pub runtime: VolteRuntimeView,
+    pub platform_supported: bool,
+}
+
+impl VolteControlResponse {
+    pub fn build(cfg: &crate::config::VolteConfig, runtime: &crate::volte::RuntimeStatus) -> Self {
+        Self {
+            config: VolteConfigView {
+                feature_enabled: cfg.feature_enabled,
+                connection_enabled: cfg.connection_enabled,
+                sms_enabled: cfg.sms_enabled,
+            },
+            runtime: VolteRuntimeView::from(runtime.clone()),
+            platform_supported: cfg!(target_os = "linux"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetVolteFeatureRequest {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Serialize, Default)]

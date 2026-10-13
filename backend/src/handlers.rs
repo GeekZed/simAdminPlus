@@ -3619,10 +3619,22 @@ pub async fn set_call_forwarding_handler(
 }
 
 pub async fn get_ims_status_handler() -> impl IntoResponse {
+    // 原生 IMS 运行时持有真实注册状态，不再返回"未暴露"的占位结果
+    let runtime = crate::volte::read_runtime_status().unwrap_or_default();
+    let status = ImsStatusResponse {
+        registered: runtime.registered,
+        voice_capable: runtime.registered,
+        sms_capable: runtime.sms_ready,
+        phase: runtime.phase,
+        transport: runtime.transport,
+        interface: runtime.interface,
+        last_error: runtime.last_error,
+    };
     (
         StatusCode::OK,
-        Json(ApiResponse::<ImsStatusResponse>::error(
-            "IMS status is not exposed by ModemManager on this backend",
+        Json(ApiResponse::success_with_message(
+            "IMS runtime status",
+            status,
         )),
     )
 }
@@ -4722,6 +4734,106 @@ pub async fn test_automation_task_handler(
         Json(ApiResponse::success_with_message(
             "任务已在后台下发立即执行",
             json!({}),
+        )),
+    )
+}
+
+/// 组装 VoLTE 控制台响应。
+/// 保持 `config` / `runtime` / `platform_supported` 三段式结构，与前端
+/// `VolteControlResponse` 契约严格对齐。
+fn volte_control_payload(config: &crate::config::AppConfig) -> VolteControlResponse {
+    let runtime = crate::volte::read_runtime_status().unwrap_or_default();
+    VolteControlResponse::build(&config.volte, &runtime)
+}
+
+pub async fn get_volte_control_handler(State(app): State<AppState>) -> impl IntoResponse {
+    let config = app.config_manager.get_config();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            "VoLTE control status",
+            volte_control_payload(&config),
+        )),
+    )
+}
+
+/// 请求丢弃现有 IMS 承载并重建。supervisor 会在下一轮循环消费该请求。
+pub async fn post_volte_reconnect_handler(State(app): State<AppState>) -> impl IntoResponse {
+    if let Err(error) = crate::volte::request_reconnect() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<VolteControlResponse>::error(error.to_string())),
+        );
+    }
+    let config = app.config_manager.get_config();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            "VoLTE reconnect requested",
+            volte_control_payload(&config),
+        )),
+    )
+}
+
+pub async fn set_volte_feature_handler(
+    State(app): State<AppState>,
+    Json(payload): Json<SetVolteFeatureRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = app.config_manager.set_volte_enabled(payload.enabled) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<VolteControlResponse>::error(error)),
+        );
+    }
+    let config = app.config_manager.get_config();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            "VoLTE feature updated",
+            volte_control_payload(&config),
+        )),
+    )
+}
+
+pub async fn set_volte_connection_handler(
+    State(app): State<AppState>,
+    Json(payload): Json<SetVolteFeatureRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = app
+        .config_manager
+        .set_volte_connection_enabled(payload.enabled)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<VolteControlResponse>::error(error)),
+        );
+    }
+    let config = app.config_manager.get_config();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            "VoLTE connection updated",
+            volte_control_payload(&config),
+        )),
+    )
+}
+
+pub async fn set_volte_sms_handler(
+    State(app): State<AppState>,
+    Json(payload): Json<SetVolteFeatureRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = app.config_manager.set_volte_sms_enabled(payload.enabled) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<VolteControlResponse>::error(error)),
+        );
+    }
+    let config = app.config_manager.get_config();
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success_with_message(
+            "VoLTE SMS updated",
+            volte_control_payload(&config),
         )),
     )
 }

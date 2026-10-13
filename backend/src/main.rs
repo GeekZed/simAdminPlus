@@ -35,6 +35,12 @@ mod device_status;
 mod esim;
 mod handlers;
 mod hub_agent;
+mod ims_channel;
+mod ims_identity;
+mod ims_ipsec;
+mod ims_sip;
+mod ims_sms;
+mod ims_uim;
 mod iptables;
 mod models;
 mod modem_manager;
@@ -42,6 +48,7 @@ mod modem_recovery;
 mod notification;
 mod notification_queue;
 mod ota;
+mod secondary_qmi;
 mod serial;
 mod sms_listener;
 mod state;
@@ -49,6 +56,7 @@ mod system_event;
 mod system_event_monitor;
 mod utils;
 mod verification_code;
+mod volte;
 
 use config::{get_default_config_path, ConfigManager};
 use db::Database;
@@ -263,6 +271,8 @@ enum CliCommand {
         /// 解压目标目录
         target: String,
     },
+    /// 在 ModemManager 启动前初始化并持有 DATA6 secondary QMI 端点
+    SecondaryQmiInit,
 }
 
 #[derive(Subcommand, Debug)]
@@ -299,6 +309,11 @@ async fn main() -> Result<()> {
     // 处理非服务子命令
     if let Some(CliCommand::ExtractZip { archive, target }) = &cli.command {
         return run_extract_zip(archive, target);
+    }
+    // secondary QMI 端点需在 ModemManager 之前被独占持有，故由独立 systemd
+    // 单元以该子命令常驻运行，主服务只消费其暴露出的设备路径。
+    if matches!(&cli.command, Some(CliCommand::SecondaryQmiInit)) {
+        return secondary_qmi::initialize_and_hold();
     }
     if let Some(CliCommand::Auth { command }) = &cli.command {
         let db = Database::new(get_data_db_path())?;
@@ -375,6 +390,24 @@ async fn main() -> Result<()> {
         Arc::clone(&dbus_conn),
         Arc::clone(&ddns_manager),
     );
+
+    // 原生 IMS/VoLTE 承载 supervisor。以独立任务常驻，循环内读取配置开关，
+    // 因此通过 Web 修改开关或触发重连都会在下一轮生效，无需重启服务。
+    {
+        let config_clone = Arc::clone(&config_manager);
+        let conn_clone = Arc::clone(&dbus_conn);
+        let database_clone = Arc::clone(&app_db);
+        let notifications_clone = Arc::clone(&notification_sender);
+        tokio::spawn(async move {
+            volte::run_secondary_ims_bearer_supervisor(
+                config_clone,
+                conn_clone,
+                database_clone,
+                notifications_clone,
+            )
+            .await;
+        });
+    }
 
     {
         let ddns_manager_clone = Arc::clone(&ddns_manager);
@@ -566,6 +599,34 @@ async fn main() -> Result<()> {
             get(get_radio_mode_handler)
                 .post(set_radio_mode_handler)
                 .options(options_handler),
+        )
+        .route(
+            "/api/ims/status",
+            get(get_ims_status_handler).options(options_handler),
+        )
+        .route(
+            "/api/volte/status",
+            get(get_ims_status_handler).options(options_handler),
+        )
+        .route(
+            "/api/volte/control",
+            get(get_volte_control_handler).options(options_handler),
+        )
+        .route(
+            "/api/volte/reconnect",
+            post(post_volte_reconnect_handler).options(options_handler),
+        )
+        .route(
+            "/api/volte/feature",
+            post(set_volte_feature_handler).options(options_handler),
+        )
+        .route(
+            "/api/volte/connection",
+            post(set_volte_connection_handler).options(options_handler),
+        )
+        .route(
+            "/api/volte/sms",
+            post(set_volte_sms_handler).options(options_handler),
         )
         .route(
             "/api/band-lock",

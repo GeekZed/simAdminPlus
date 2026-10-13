@@ -3195,6 +3195,54 @@ async fn send_mm_at_command(proxy: &Proxy<'_>, cmd: &str) -> Option<String> {
     proxy.call("Command", &(cmd, 3u32)).await.ok()
 }
 
+/// 通过 ModemManager D-Bus 的 `Modem.Command` 接口向基带发送 AT 命令。
+///
+/// 原生 VoLTE/IMS 运行时依赖该通道完成两件关键事情：
+/// 1. 建立 IMS APN 上下文（`AT+CGDCONT` / `AT+CGACT`）；
+/// 2. 探测 P-CSCF 地址（`AT+CGCONTRDP`）——ModemManager 不会主动上报
+///    IMS 承载的 P-CSCF，只能由基带经 AT 通道回读，这是 VoLTE 注册的前提。
+///
+/// `Modem.Command` 仅在 ModemManager 以 `--debug` 运行时暴露，因此这里在首次
+/// 调用前动态提升日志级别。串行化由 `serial::with_serial` 保证，避免与短信、
+/// 拨号等其它 AT 调用争抢 ModemManager。
+pub async fn send_at_command(
+    conn: &Connection,
+    modem_path: &str,
+    command: &str,
+) -> Result<String, String> {
+    const AT_TIMEOUT_SECS: u32 = 10;
+
+    if let Ok(mm_proxy) = Proxy::new(
+        conn,
+        MM_SERVICE,
+        MM_ROOT_PATH,
+        "org.freedesktop.ModemManager1",
+    )
+    .await
+    {
+        let _ = mm_proxy.call::<_, _, ()>("SetLogging", &("DEBUG")).await;
+    }
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(AT_TIMEOUT_SECS as u64 + 5),
+        crate::serial::with_serial(async {
+            let proxy = Proxy::new(conn, MM_SERVICE, modem_path, MM_MODEM)
+                .await
+                .map_err(|e| e.to_string())?;
+            proxy
+                .call::<_, _, String>("Command", &(command, AT_TIMEOUT_SECS))
+                .await
+                .map_err(|e| e.to_string())
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(format!("AT command timed out: {command}")),
+    }
+}
+
 static LAST_SIGNAL_POKE_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn poke_signal_quality_if_needed() {

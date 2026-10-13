@@ -1767,6 +1767,29 @@ impl Default for EsimConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolteConfig {
+    /// 是否启用原生 VoLTE 运行时（IMS 承载 + SIP REGISTER）
+    #[serde(default)]
+    pub feature_enabled: bool,
+    /// IMS 承载是否保持常驻连接
+    #[serde(default)]
+    pub connection_enabled: bool,
+    /// 是否启用 VoLTE 短信（IMS SIP MESSAGE）
+    #[serde(default)]
+    pub sms_enabled: bool,
+}
+
+impl Default for VolteConfig {
+    fn default() -> Self {
+        Self {
+            feature_enabled: false,
+            connection_enabled: false,
+            sms_enabled: false,
+        }
+    }
+}
+
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -1797,6 +1820,8 @@ pub struct AppConfig {
     pub automation: AutomationConfig,
     #[serde(default)]
     pub backup: BackupConfig,
+    #[serde(default)]
+    pub volte: VolteConfig,
 }
 
 impl Default for AppConfig {
@@ -1815,6 +1840,7 @@ impl Default for AppConfig {
             esim: EsimConfig::default(),
             automation: AutomationConfig::default(),
             backup: BackupConfig::default(),
+            volte: VolteConfig::default(),
         }
     }
 }
@@ -2157,6 +2183,35 @@ impl ConfigManager {
         {
             let mut c = self.config.write().unwrap();
             c.device_network.ddns = ddns;
+        }
+        self.save()
+    }
+
+    /// 切换原生 VoLTE 运行时。语音注册与 IMS 短信同源，统一开闭以避免
+    /// 出现"语音已注册但短信未就绪"的半可用状态。
+    pub fn set_volte_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut c = self.config.write().unwrap();
+            c.volte.feature_enabled = enabled;
+            c.volte.sms_enabled = enabled;
+        }
+        self.save()
+    }
+
+    /// 单独控制 IMS 短信能力，与 VoLTE 语音注册解耦。
+    pub fn set_volte_sms_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut c = self.config.write().unwrap();
+            c.volte.sms_enabled = enabled;
+        }
+        self.save()
+    }
+
+    /// 控制 IMS 承载是否常驻连接（与语音注册开关相互独立）。
+    pub fn set_volte_connection_enabled(&self, enabled: bool) -> Result<(), String> {
+        {
+            let mut c = self.config.write().unwrap();
+            c.volte.connection_enabled = enabled;
         }
         self.save()
     }
