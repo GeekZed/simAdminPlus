@@ -29,6 +29,11 @@ fn qmicli_with_timeout(seconds: &str) -> Command {
     command
 }
 
+/// 原生 IMS 运行时的可观测状态。
+///
+/// 该结构同时用作「写状态文件」与「读状态给前端」的唯一载体，因此所有字段都
+/// 标注 `#[serde(default)]`：新增诊断字段时，历史状态文件与既有 16 处写入
+/// 点（均使用 `..RuntimeStatus::default()` 展开）都无需改动即可保持向后兼容。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeStatus {
     #[serde(default)]
@@ -43,6 +48,44 @@ pub struct RuntimeStatus {
     pub interface: String,
     #[serde(default)]
     pub last_error: String,
+    /// IMS 承载的地址族（如 `ipv6`）
+    #[serde(default)]
+    pub family: String,
+    /// IMS 承载获得的本地 IPv6 地址
+    #[serde(default)]
+    pub local_ip: String,
+    /// 实际完成注册的 P-CSCF 地址
+    #[serde(default)]
+    pub pcscf: String,
+    /// IMS 承载建立时刻（RFC3339）
+    #[serde(default)]
+    pub session_started_at: String,
+    /// SIP REGISTER 成功时刻（RFC3339）
+    #[serde(default)]
+    pub registered_at: String,
+    /// 最近一次失败时刻（RFC3339），用于诊断间歇性失败
+    #[serde(default)]
+    pub last_failure_at: String,
+    /// 失败原因摘要（已脱敏），与 `last_error` 并存便于前端分组展示
+    #[serde(default)]
+    pub registration_degraded_reason: String,
+    /// 下次重试时刻（RFC3339）
+    #[serde(default)]
+    pub next_retry_at: String,
+    /// 距下次重试的秒数
+    #[serde(default)]
+    pub retry_after_secs: Option<u64>,
+    /// 注册成功累计次数
+    #[serde(default)]
+    pub reconnect_count: u64,
+    /// 注册失败累计次数
+    #[serde(default)]
+    pub failure_count: u64,
+}
+
+/// 生成 RFC3339 时间戳；系统时钟不可用时返回空串，避免污染状态文件。
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 pub fn read_runtime_status() -> Option<RuntimeStatus> {
@@ -722,6 +765,9 @@ pub async fn run_secondary_ims_bearer_supervisor(
     let mut sms_listener: Option<JoinHandle<()>> = None;
     let mut active_xfrm: Option<crate::ims_ipsec::XfrmPlan> = None;
     let mut active_network: Option<ConfiguredImsNetwork> = None;
+    // 跨轮次累计的重连/失败计数，用于前端展示 IMS 会话稳定性趋势
+    let mut reconnect_count: u64 = 0;
+    let mut failure_count: u64 = 0;
 
     loop {
         let volte = config.get_config().volte;
@@ -832,6 +878,18 @@ pub async fn run_secondary_ims_bearer_supervisor(
                 Ok((handle, settings)) => {
                     active = Some((device.clone(), handle));
                     let mut pcscf_candidates = Vec::new();
+                    // 承载已建立：记录会话起点与 IMS 侧地址，后续诊断可据此
+                    // 判断失败发生在「承载层」还是「注册层」。
+                    let session_started_at = now_rfc3339();
+                    let _ = write_runtime_status(&RuntimeStatus {
+                        phase: "ims_bearer_up".to_string(),
+                        transport: "native_qmi".to_string(),
+                        interface: netdev.clone(),
+                        family: "ipv6".to_string(),
+                        local_ip: settings.ipv6_address.clone(),
+                        session_started_at: session_started_at.clone(),
+                        ..RuntimeStatus::default()
+                    });
                     let _ = write_runtime_status(&RuntimeStatus {
                         phase: "pcscf_discovering".to_string(),
                         transport: "native_qmi".to_string(),
@@ -855,6 +913,12 @@ pub async fn run_secondary_ims_bearer_supervisor(
                                     let _ = write_runtime_status(&RuntimeStatus {
                                         phase: "pcscf_discovered".to_string(),
                                         transport: "native_qmi".to_string(),
+                                        pcscf: pcscf_candidates
+                                            .iter()
+                                            .map(|c| c.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                        session_started_at: session_started_at.clone(),
                                         ..RuntimeStatus::default()
                                     });
                                 }
@@ -868,6 +932,10 @@ pub async fn run_secondary_ims_bearer_supervisor(
                             phase: "ims_registering".to_string(),
                             transport: "native_qmi_ipsec".to_string(),
                             interface: netdev.clone(),
+                            family: "ipv6".to_string(),
+                            local_ip: settings.ipv6_address.clone(),
+                            pcscf: pcscf.to_string(),
+                            session_started_at: session_started_at.clone(),
                             ..RuntimeStatus::default()
                         });
                         if let Err(error) = configure_secondary_ipv6_interface(
@@ -928,16 +996,32 @@ pub async fn run_secondary_ims_bearer_supervisor(
                                     sms_ready: volte.sms_enabled,
                                     transport: "native_qmi_ipsec".to_string(),
                                     interface: netdev.clone(),
+                                    family: "ipv6".to_string(),
+                                    local_ip: settings.ipv6_address.clone(),
+                                    pcscf: pcscf.to_string(),
+                                    session_started_at: session_started_at.clone(),
+                                    registered_at: now_rfc3339(),
+                                    reconnect_count: reconnect_count,
                                     ..RuntimeStatus::default()
                                 });
+                                reconnect_count += 1;
                                 break;
                             }
                             Err(error) => {
                                 tracing::warn!(pcscf = %pcscf, error = %error, "IMS registration attempt failed");
+                                failure_count += 1;
                                 let _ = write_runtime_status(&RuntimeStatus {
                                     phase: "register_failed".to_string(),
                                     transport: "native_qmi_ipsec".to_string(),
-                                    last_error: error.to_string(),
+                                    interface: netdev.clone(),
+                                    family: "ipv6".to_string(),
+                                    local_ip: settings.ipv6_address.clone(),
+                                    pcscf: pcscf.to_string(),
+                                    session_started_at: session_started_at.clone(),
+                                    last_failure_at: now_rfc3339(),
+                                    registration_degraded_reason: error.to_string(),
+                                    failure_count,
+                                    reconnect_count,
                                     ..RuntimeStatus::default()
                                 });
                             }

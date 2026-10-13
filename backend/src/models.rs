@@ -762,6 +762,8 @@ impl From<crate::volte::RuntimeStatus> for VolteRuntimeView {
     fn from(s: crate::volte::RuntimeStatus) -> Self {
         let opt = |v: String| if v.trim().is_empty() { None } else { Some(v) };
         let enabled = s.phase != "idle";
+        // 后端未采集的 SIP 会话级指标（收发计数、最近收发时刻）显式置空，
+        // 避免页面出现看似有效实则恒零的诊断结论。
         Self {
             phase: s.phase,
             stage: None,
@@ -769,24 +771,23 @@ impl From<crate::volte::RuntimeStatus> for VolteRuntimeView {
             registered: s.registered,
             registration_mode: opt(s.transport.clone()),
             interface: opt(s.interface),
-            // 运行时尚未持久化地址族/地址/P-CSCF，明确置空而非猜测
-            family: None,
-            local_ip: None,
-            pcscf: None,
-            session_started_at: None,
-            registered_at: None,
+            family: opt(s.family),
+            local_ip: opt(s.local_ip),
+            pcscf: opt(s.pcscf),
+            session_started_at: opt(s.session_started_at),
+            registered_at: opt(s.registered_at),
             last_rx_at: None,
             last_tx_at: None,
             last_error: opt(s.last_error),
-            last_failure_at: None,
-            next_retry_at: None,
-            retry_after_secs: None,
-            registration_degraded_reason: None,
+            last_failure_at: opt(s.last_failure_at),
+            next_retry_at: opt(s.next_retry_at),
+            retry_after_secs: s.retry_after_secs,
+            registration_degraded_reason: opt(s.registration_degraded_reason),
             sent_count: 0,
             received_count: 0,
             duplicate_count: 0,
-            failure_count: 0,
-            reconnect_count: 0,
+            failure_count: s.failure_count,
+            reconnect_count: s.reconnect_count,
             data_path_mode: opt(s.transport),
             data_path_degraded_reason: None,
         }
