@@ -858,10 +858,6 @@ async fn main() -> Result<()> {
             post(clear_call_history_handler).options(options_handler),
         )
         .route(
-            "/api/ims/status",
-            get(get_ims_status_handler).options(options_handler),
-        )
-        .route(
             "/api/voicemail/status",
             get(get_voicemail_status_handler).options(options_handler),
         )
